@@ -1,15 +1,19 @@
 module Backtest
-    ( Decision(..)
+    ( Decision(..)       -- already has (..)
     , decisionToString
-    , MarketData(..)
+    , MarketData(..)     -- add (..)
     , candleMomentum
     , Strategy
-    , BacktestState(..)
+    , BacktestState(..)  -- add (..)
     , initialBacktestState
     , stepBacktest
     , runBacktest
+<<<<<<< HEAD
      ) where
 
+=======
+    ) where
+>>>>>>> 579d2d98a5b7683bcac9eeef31174489250816c0
 import Data.Time
 
 data Decision
