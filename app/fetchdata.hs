@@ -11,6 +11,7 @@ import Data.Time
 import qualified Data.Set as Set
 import Data.Maybe (mapMaybe)
 import System.Directory (doesFileExist)
+import Control.Monad (forever)
 
 main :: IO ()
 main = withSocketsDo $ do

@@ -16,12 +16,7 @@ executable HASKELL-TRADER
     import:           warnings
     main-is:          Main.hs
     other-modules:    Backtest, Strategies, TUI
-    build-depends:    base ^>=4.18.3.0,
-                      network,
-                      bytestring,
-                      time,
-                      layoutz,
-                      containers
+    build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory, layoutz
     hs-source-dirs:   app
     default-language: Haskell2010
 
@@ -29,16 +24,6 @@ executable fetch-data
     import:           warnings
     main-is:          fetchdata.hs
     other-modules:    Backtest, Strategies
-    build-depends:    base ^>=4.18.3.0,
-                      network,
-                      bytestring,
-                      time,
-                      containers
+    build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010
-
-
-
-
-
-
