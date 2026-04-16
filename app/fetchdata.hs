@@ -26,7 +26,7 @@ main = withSocketsDo $ do
     existingTimes <- loadExistingTimestamps "HistoricalData1Min.csv"
 
     -- open CSV file once
-    handle <- openFile "HistoricalData1Min.csv" AppendMode
+    handle <- openFile "1YearHistoricalData1Min.csv" AppendMode
 
     stateRef <- newIORef initialBacktestState -- added by storey
 
