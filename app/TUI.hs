@@ -63,7 +63,7 @@ runTUI :: TuiHandle -> IO ()
 runTUI h = runApp $ LayoutzApp
     { appInit          = (AppModel h, CmdNone)
     , appUpdate        = \Tick m -> (m, CmdNone)
-    , appSubscriptions = \_ -> subTick 500 Tick
+    , appSubscriptions = \_ -> subEveryMs 500 Tick
     , appView          = \m ->
         let (TuiHandle ref) = appHandle m
             s = unsafePerformIO (readIORef ref)
