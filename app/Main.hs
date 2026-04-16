@@ -2,12 +2,14 @@ import Network.Socket
 import qualified Network.Socket.ByteString as NBS
 import qualified Data.ByteString.Char8 as BS
 import Control.Monad (forever)
+import Control.Concurrent (forkIO)
 import Text.Read (readMaybe)
 import System.IO
 import Backtest
 import Strategies
 import Data.IORef
 import Data.Time
+import TUI
 
 
 
@@ -15,33 +17,34 @@ main :: IO ()
 main = withSocketsDo $ do
     addr <- resolve
     sock <- open addr
-    putStrLn "Server listening on port 5001..." -- 5000 not working for storey
 
     -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
-    stateRef <- newIORef initialBacktestState -- added by storey
+    stateRef  <- newIORef initialBacktestState
+    tuiHandle <- newTuiHandle                  -- TUI shared state
 
-    (conn, _) <- accept sock
-    putStrLn "Client connected"
-    handleClient conn handle stateRef
+    -- socket server on background thread; TUI owns the main thread
+    _ <- forkIO $ do
+        (conn, _) <- accept sock
+        handleClient conn handle stateRef tuiHandle
 
-handleClient :: Socket -> Handle -> IORef BacktestState -> IO ()
-handleClient conn handle stateRef = do
+    runTUI tuiHandle
+
+handleClient :: Socket -> Handle -> IORef BacktestState -> TuiHandle -> IO ()
+handleClient conn handle stateRef tuiHandle = do
     msg <- NBS.recv conn 1024
 
     if BS.null msg
-        then putStrLn "Client disconnected"
+        then return () -- Client disconnected
         else do
             let str = BS.unpack msg
-            putStrLn ("Received: " ++ str)
 
             case parseCandle str of
                 Nothing -> do
-                    putStrLn "Parse error"
                     NBS.sendAll conn (BS.pack "HOLD\n")
 
-                Just (time, o,h,l,c) -> do 
+                Just (time, o,h,l,c) -> do
                     let marketData = MarketData
                          { timestamp = time
                          , openPrice = o
@@ -49,17 +52,16 @@ handleClient conn handle stateRef = do
                          , lowPrice = l
                          , closePrice = c
                          }
-                        action = decisionToString (simpleStrategy marketData) -- given strategy (simpleStrategy is for testing)
-                            
+                        decision = simpleStrategy marketData
+                        action   = decisionToString decision
+
                     oldState <- readIORef stateRef
                     let newState = stepBacktest simpleStrategy oldState marketData
                     writeIORef stateRef newState
 
-                    putStrLn ("Sending: " ++ action)
-                    putStrLn "Backtest state: "
-                    print newState -- prints updated state
+                    updateTUI tuiHandle newState marketData decision -- update TUI
 
-                        -- WRITE TO CSV, needs to be after action
+                    -- WRITE TO CSV, needs to be after action
                     hPutStrLn handle $
                         show time ++ "," ++
                         show o ++ "," ++
@@ -71,7 +73,7 @@ handleClient conn handle stateRef = do
                     hFlush handle  -- force save immediately
 
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
-            handleClient conn handle stateRef -- loop to handle next message
+            handleClient conn handle stateRef tuiHandle -- loop to handle next message
 
 parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =
