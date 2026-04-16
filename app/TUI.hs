@@ -2,6 +2,13 @@ module TUI (TuiHandle, newTuiHandle, runTUI, updateTUI) where
 
 import Layoutz
 import Backtest
+    ( BacktestState(..)
+    , MarketData(..)
+    , Decision(..)
+    , decisionToString
+    , candleMomentum
+    , initialBacktestState
+    )
 import Data.IORef
 import Data.Time (UTCTime, formatTime, defaultTimeLocale)
 import System.IO.Unsafe (unsafePerformIO)
