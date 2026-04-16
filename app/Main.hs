@@ -4,63 +4,85 @@ import qualified Data.ByteString.Char8 as BS
 import Control.Monad (forever)
 import Text.Read (readMaybe)
 import System.IO
+import Backtest
+import Strategies
+import Data.IORef
+import Data.Time
+
+
 
 main :: IO ()
 main = withSocketsDo $ do
     addr <- resolve
     sock <- open addr
-    putStrLn "Server listening on port 5000..."
+    putStrLn "Server listening on port 5001..." -- 5000 not working for storey
 
     -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
+    stateRef <- newIORef initialBacktestState -- added by storey
+
     (conn, _) <- accept sock
     putStrLn "Client connected"
+    handleClient conn handle stateRef
 
-    forever $ do
-        msg <- NBS.recv conn 1024
+handleClient :: Socket -> Handle -> IORef BacktestState -> IO ()
+handleClient conn handle stateRef = do
+    msg <- NBS.recv conn 1024
 
-        if BS.null msg
-            then putStrLn "Empty message"
-            else do
-                let str = BS.unpack msg
-                putStrLn ("Received: " ++ str)
+    if BS.null msg
+        then putStrLn "Client disconnected"
+        else do
+            let str = BS.unpack msg
+            putStrLn ("Received: " ++ str)
 
-                case parseCandle str of
-                    Nothing -> do
-                        putStrLn "Parse error"
-                        NBS.sendAll conn (BS.pack "HOLD\n")
+            case parseCandle str of
+                Nothing -> do
+                    putStrLn "Parse error"
+                    NBS.sendAll conn (BS.pack "HOLD\n")
 
-                    Just (o,h,l,c) -> do 
-                        let action = -- the real action and what it sends back to C#
-                                if c > o then "BUY"
-                                else if c < o then "SELL"
-                                else "HOLD"
+                Just (time, o,h,l,c) -> do 
+                    let marketData = MarketData
+                         { timestamp = time
+                         , openPrice = o
+                         , highPrice = h
+                         , lowPrice = l
+                         , closePrice = c
+                         }
+                        action = decisionToString (simpleStrategy marketData) -- given strategy (simpleStrategy is for testing)
+                            
+                    oldState <- readIORef stateRef
+                    let newState = stepBacktest simpleStrategy oldState marketData
+                    writeIORef stateRef newState
 
-                        putStrLn ("Sending: " ++ action)
+                    putStrLn ("Sending: " ++ action)
+                    putStrLn "Backtest state: "
+                    print newState -- prints updated state
 
                         -- WRITE TO CSV, needs to be after action
-                        hPutStrLn handle $
-                            show o ++ "," ++
-                            show h ++ "," ++
-                            show l ++ "," ++
-                            show c ++ "," ++
-                            action
+                    hPutStrLn handle $
+                        show time ++ "," ++
+                        show o ++ "," ++
+                        show h ++ "," ++
+                        show l ++ "," ++
+                        show c ++ "," ++
+                        action
 
-                        hFlush handle  -- force save immediately
+                    hFlush handle  -- force save immediately
 
-                        NBS.sendAll conn (BS.pack (action ++ "\n"))
+                    NBS.sendAll conn (BS.pack (action ++ "\n"))
+            handleClient conn handle stateRef -- loop to handle next message
 
-parseCandle :: String -> Maybe (Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
+parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =
     case splitComma str of
-        [o,h,l,c] -> do -- 'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+        [t,o,h,l,c] -> do -- 't' Date then time,'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+            time  <- parseTimeStamp t
             open  <- readMaybe o
             high  <- readMaybe h
             low   <- readMaybe l
             close <- readMaybe c
-            return (open, high, low, close)
-        _ -> Nothing
+            return (time , open, high, low, close)
 
 splitComma :: String -> [String]-- takes the new list of items from above and makes them each their own thing
 splitComma s =
@@ -74,7 +96,7 @@ resolve = do
             { addrFlags = [AI_PASSIVE]
             , addrSocketType = Stream
             }
-    head <$> getAddrInfo (Just hints) Nothing (Just "5000")
+    head <$> getAddrInfo (Just hints) Nothing (Just "5001") -- 5000 wont work on my machine
 
 open :: AddrInfo -> IO Socket
 open addr = do
@@ -84,3 +106,6 @@ open addr = do
     bind sock (addrAddress addr)
     listen sock 1
     return sock
+
+parseTimeStamp :: String -> Maybe UTCTime
+parseTimeStamp = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Q"))
