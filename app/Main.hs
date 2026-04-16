@@ -2,65 +2,89 @@ import Network.Socket
 import qualified Network.Socket.ByteString as NBS
 import qualified Data.ByteString.Char8 as BS
 import Control.Monad (forever)
+import Control.Concurrent (forkIO)
 import Text.Read (readMaybe)
 import System.IO
+import Backtest
+import Strategies
+import Data.IORef
+import Data.Time
+import TUI
+
+
 
 main :: IO ()
 main = withSocketsDo $ do
     addr <- resolve
     sock <- open addr
-    putStrLn "Server listening on port 5000..."
 
     -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
-    (conn, _) <- accept sock
-    putStrLn "Client connected"
+    stateRef  <- newIORef initialBacktestState
+    tuiHandle <- newTuiHandle                  -- TUI shared state
 
-    forever $ do
-        msg <- NBS.recv conn 1024
+    -- socket server on background thread; TUI owns the main thread
+    _ <- forkIO $ do
+        (conn, _) <- accept sock
+        handleClient conn handle stateRef tuiHandle
 
-        if BS.null msg
-            then putStrLn "Empty message"
-            else do
-                let str = BS.unpack msg
-                putStrLn ("Received: " ++ str)
+    runTUI tuiHandle
 
-                case parseCandle str of
-                    Nothing -> do
-                        putStrLn "Parse error"
-                        NBS.sendAll conn (BS.pack "HOLD\n")
+handleClient :: Socket -> Handle -> IORef BacktestState -> TuiHandle -> IO ()
+handleClient conn handle stateRef tuiHandle = do
+    msg <- NBS.recv conn 1024
 
-                    Just (o,h,l,c) -> do 
-                        let action = -- the real action and what it sends back to C#
-                                if c > o then "BUY"
-                                else if c < o then "SELL"
-                                else "HOLD"
+    if BS.null msg
+        then return () -- Client disconnected
+        else do
+            let str = BS.unpack msg
 
-                        putStrLn ("Sending: " ++ action)
+            case parseCandle str of
+                Nothing -> do
+                    NBS.sendAll conn (BS.pack "HOLD\n")
 
-                        -- WRITE TO CSV, needs to be after action
-                        hPutStrLn handle $
-                            show o ++ "," ++
-                            show h ++ "," ++
-                            show l ++ "," ++
-                            show c ++ "," ++
-                            action
+                Just (time, o,h,l,c) -> do
+                    let marketData = MarketData
+                         { timestamp = time
+                         , openPrice = o
+                         , highPrice = h
+                         , lowPrice = l
+                         , closePrice = c
+                         }
+                        decision = simpleStrategy marketData
+                        action   = decisionToString decision
 
-                        hFlush handle  -- force save immediately
+                    oldState <- readIORef stateRef
+                    let newState = stepBacktest simpleStrategy oldState marketData
+                    writeIORef stateRef newState
 
-                        NBS.sendAll conn (BS.pack (action ++ "\n"))
+                    updateTUI tuiHandle newState marketData decision -- update TUI
 
-parseCandle :: String -> Maybe (Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
+                    -- WRITE TO CSV, needs to be after action
+                    hPutStrLn handle $
+                        show time ++ "," ++
+                        show o ++ "," ++
+                        show h ++ "," ++
+                        show l ++ "," ++
+                        show c ++ "," ++
+                        action
+
+                    hFlush handle  -- force save immediately
+
+                    NBS.sendAll conn (BS.pack (action ++ "\n"))
+            handleClient conn handle stateRef tuiHandle -- loop to handle next message
+
+parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =
     case splitComma str of
-        [o,h,l,c] -> do -- 'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+        [t,o,h,l,c] -> do -- 't' Date then time,'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+            time  <- parseTimeStamp t
             open  <- readMaybe o
             high  <- readMaybe h
             low   <- readMaybe l
             close <- readMaybe c
-            return (open, high, low, close)
-        _ -> Nothing
+            return (time , open, high, low, close)
 
 splitComma :: String -> [String]-- takes the new list of items from above and makes them each their own thing
 splitComma s =
@@ -74,7 +98,7 @@ resolve = do
             { addrFlags = [AI_PASSIVE]
             , addrSocketType = Stream
             }
-    head <$> getAddrInfo (Just hints) Nothing (Just "5000")
+    head <$> getAddrInfo (Just hints) Nothing (Just "5001") -- 5000 wont work on my machine
 
 open :: AddrInfo -> IO Socket
 open addr = do
@@ -84,3 +108,6 @@ open addr = do
     bind sock (addrAddress addr)
     listen sock 1
     return sock
+
+parseTimeStamp :: String -> Maybe UTCTime
+parseTimeStamp = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Q"))
