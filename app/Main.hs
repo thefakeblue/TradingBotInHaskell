@@ -7,6 +7,8 @@ import System.IO
 import Backtest
 import Strategies
 import Data.IORef
+import Data.Time
+
 
 
 main :: IO ()
@@ -39,9 +41,10 @@ handleClient conn handle stateRef = do
                     putStrLn "Parse error"
                     NBS.sendAll conn (BS.pack "HOLD\n")
 
-                Just (o,h,l,c) -> do 
+                Just (time, o,h,l,c) -> do 
                     let marketData = MarketData
-                         { openPrice = o
+                         { timestamp = time
+                         , openPrice = o
                          , highPrice = h
                          , lowPrice = l
                          , closePrice = c
@@ -58,6 +61,7 @@ handleClient conn handle stateRef = do
 
                         -- WRITE TO CSV, needs to be after action
                     hPutStrLn handle $
+                        show time ++ "," ++
                         show o ++ "," ++
                         show h ++ "," ++
                         show l ++ "," ++
@@ -69,16 +73,16 @@ handleClient conn handle stateRef = do
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
             handleClient conn handle stateRef -- loop to handle next message
 
-parseCandle :: String -> Maybe (Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
+parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =
     case splitComma str of
-        [o,h,l,c] -> do -- 'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+        [t,o,h,l,c] -> do -- 't' Date then time,'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+            time  <- parseTimeStamp t
             open  <- readMaybe o
             high  <- readMaybe h
             low   <- readMaybe l
             close <- readMaybe c
-            return (open, high, low, close)
-        _ -> Nothing
+            return (time , open, high, low, close)
 
 splitComma :: String -> [String]-- takes the new list of items from above and makes them each their own thing
 splitComma s =
@@ -102,3 +106,6 @@ open addr = do
     bind sock (addrAddress addr)
     listen sock 1
     return sock
+
+parseTimeStamp :: String -> Maybe UTCTime
+parseTimeStamp = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Q"))

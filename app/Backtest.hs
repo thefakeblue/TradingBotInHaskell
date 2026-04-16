@@ -1,3 +1,4 @@
+
 module Backtest
     ( Decision(..)
     , decisionToString
@@ -9,7 +10,7 @@ module Backtest
     , stepBacktest
     , runBacktest
      ) where
-
+import Data.Time
 
 data Decision
     = Buy Double -- if strategy recommends quantity to buy/sell
@@ -24,7 +25,8 @@ decisionToString Hold = "HOLD"
 
 -- must contain info needed to make strategy decision:
 data MarketData = MarketData
-    {openPrice :: Double,
+    { timestamp  :: UTCTime, -- UTCTime beccuase of how it gets sent and parse not a double
+     openPrice :: Double,
      highPrice :: Double,
      lowPrice :: Double,
      closePrice :: Double
