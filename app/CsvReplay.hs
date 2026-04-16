@@ -27,20 +27,32 @@ mapMaybe f (x:xs) =
         Just y  -> y : mapMaybe f xs
 
 
+<<<<<<< HEAD
 -- parse CSV row: timestamp,open,high,low,close,DECISION
+=======
+-- parse CSV row: open,high,low,close,DECISION
+>>>>>>> f66a7687d9fd158cab35b99aa202e855c2485329
 -- We IGNORE the decision and recompute it (so we can test different strategies with same file)
 parseCsvRow :: String -> Maybe MarketData
 parseCsvRow str =
     case splitComma str of
+<<<<<<< HEAD
         [ts,o,h,l,c,_] -> do
             timeVal <- readMaybe ts
+=======
+        [o,h,l,c,_] -> do
+>>>>>>> f66a7687d9fd158cab35b99aa202e855c2485329
             openVal  <- readMaybe o
             highVal  <- readMaybe h
             lowVal   <- readMaybe l
             closeVal <- readMaybe c
             return MarketData
+<<<<<<< HEAD
                 { timestamp = timeVal
                 , openPrice = openVal
+=======
+                { openPrice = openVal
+>>>>>>> f66a7687d9fd158cab35b99aa202e855c2485329
                 , highPrice = highVal
                 , lowPrice = lowVal
                 , closePrice = closeVal

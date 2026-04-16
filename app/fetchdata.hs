@@ -1,7 +1,6 @@
 import Network.Socket
 import qualified Network.Socket.ByteString as NBS
 import qualified Data.ByteString.Char8 as BS
-import Control.Monad (forever)
 import Control.Concurrent (forkIO)
 import Text.Read (readMaybe)
 import System.IO
@@ -9,39 +8,45 @@ import Backtest
 import Strategies
 import Data.IORef
 import Data.Time
-import TUI
-
-
+import qualified Data.Set as Set
+import Data.Maybe (mapMaybe)
+import System.Directory (doesFileExist)
 
 main :: IO ()
 main = withSocketsDo $ do
     addr <- resolve
     sock <- open addr
 
-    -- open CSV file once
+    putStrLn "Server listening on port 5001..."
+
+    existingTimes <- loadExistingTimestamps "trades.csv"
+
     handle <- openFile "trades.csv" AppendMode
 
     stateRef  <- newIORef initialBacktestState
-    tuiHandle <- newTuiHandle                  -- TUI shared state
+    timeSetRef <- newIORef existingTimes
 
-    -- socket server on background thread; TUI owns the main thread
     _ <- forkIO $ do
         (conn, _) <- accept sock
-        handleClient conn handle stateRef tuiHandle
+        putStrLn "Client connected"
+        handleClient conn handle stateRef timeSetRef
 
-    runTUI tuiHandle
+    -- keep main thread alive
+    forever $ return ()
 
-handleClient :: Socket -> Handle -> IORef BacktestState -> TuiHandle -> IO ()
-handleClient conn handle stateRef tuiHandle = do
+handleClient :: Socket -> Handle -> IORef BacktestState -> IORef (Set.Set UTCTime) -> IO ()
+handleClient conn handle stateRef timeSetRef = do
     msg <- NBS.recv conn 1024
 
     if BS.null msg
-        then return () -- Client disconnected
+        then putStrLn "Client disconnected"
         else do
             let str = BS.unpack msg
+            putStrLn ("Received: " ++ str)
 
             case parseCandle str of
                 Nothing -> do
+                    putStrLn "Parse error"
                     NBS.sendAll conn (BS.pack "HOLD\n")
 
                 Just (time, o,h,l,c) -> do
@@ -52,6 +57,7 @@ handleClient conn handle stateRef tuiHandle = do
                          , lowPrice = l
                          , closePrice = c
                          }
+
                         decision = simpleStrategy marketData
                         action   = decisionToString decision
 
@@ -59,26 +65,32 @@ handleClient conn handle stateRef tuiHandle = do
                     let newState = stepBacktest simpleStrategy oldState marketData
                     writeIORef stateRef newState
 
-                    updateTUI tuiHandle newState marketData decision -- update TUI
+                    print newState
 
-                    -- WRITE TO CSV, needs to be after action
-                    hPutStrLn handle $
-                        show time ++ "," ++
-                        show o ++ "," ++
-                        show h ++ "," ++
-                        show l ++ "," ++
-                        show c ++ "," ++
-                        action
+                    existingTimes <- readIORef timeSetRef
 
-                    hFlush handle  -- force save immediately
+                    if Set.member time existingTimes
+                        then putStrLn "Duplicate timestamp, skipping..."
+                        else do
+                            hPutStrLn handle $
+                                formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%S" time ++ "," ++
+                                show o ++ "," ++
+                                show h ++ "," ++
+                                show l ++ "," ++
+                                show c ++ "," ++
+                                action
+
+                            hFlush handle
+                            writeIORef timeSetRef (Set.insert time existingTimes)
 
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
-            handleClient conn handle stateRef tuiHandle -- loop to handle next message
 
-parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
+            handleClient conn handle stateRef timeSetRef
+
+parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double)
 parseCandle str =
     case splitComma str of
-        [t,o,h,l,c] -> do -- 't' Date then time,'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+        [t,o,h,l,c] -> do
             time  <- parseTimeStamp t
             open  <- readMaybe o
             high  <- readMaybe h
@@ -86,7 +98,7 @@ parseCandle str =
             close <- readMaybe c
             return (time , open, high, low, close)
 
-splitComma :: String -> [String]-- takes the new list of items from above and makes them each their own thing
+splitComma :: String -> [String]
 splitComma s =
     case break (== ',') s of
         (a, ',' : rest) -> a : splitComma rest
@@ -98,7 +110,7 @@ resolve = do
             { addrFlags = [AI_PASSIVE]
             , addrSocketType = Stream
             }
-    head <$> getAddrInfo (Just hints) Nothing (Just "5001") -- 5000 wont work on my machine
+    head <$> getAddrInfo (Just hints) Nothing (Just "5001")
 
 open :: AddrInfo -> IO Socket
 open addr = do
@@ -110,4 +122,22 @@ open addr = do
     return sock
 
 parseTimeStamp :: String -> Maybe UTCTime
-parseTimeStamp = parseTimeM True defaultTimeLocale (iso8601DateFormat (Just "%H:%M:%S%Q"))
+parseTimeStamp t =
+    parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" (take 19 t)
+
+loadExistingTimestamps :: FilePath -> IO (Set.Set UTCTime)
+loadExistingTimestamps path = do
+    exists <- doesFileExist path
+    if not exists
+        then return Set.empty
+        else do
+            content <- readFile path
+            let ls = lines content
+                times = mapMaybe extractTime ls
+            return (Set.fromList times)
+
+extractTime :: String -> Maybe UTCTime
+extractTime line =
+    case splitComma line of
+        (t:_) -> parseTimeStamp t
+        _     -> Nothing
