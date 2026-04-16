@@ -31,9 +31,7 @@ movingAverage n xs
 
 momentumOver :: Int -> [MarketData] -> Maybe Double -- momentum over k candles
 momentumOver k xs
-    | lenth xs < k+1 = Nothing
+    | length xs < k+1 = Nothing
     | otherwise =
         let recent = lastNCandles (k+1) xs
         in Just (closePrice (last recent) - closePrice (head recent)) -- momentum = change in price over k candles
-
-distanceFromMA :: Int -> [MarketData] -> Maybe Double
