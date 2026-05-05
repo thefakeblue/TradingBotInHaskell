@@ -12,6 +12,19 @@ extra-doc-files:    CHANGELOG.md
 common warnings
     ghc-options: -Wall -threaded -rtsopts -with-rtsopts=-N
 
+executable CsvReplay
+    import:           warnings
+    main-is:          CsvReplay.hs
+    hs-source-dirs:   app
+    build-depends:
+        base ^>=4.18.3.0,
+        time
+    default-language: Haskell2010
+
+    other-modules:
+        Backtest,
+        Strategies
+
 executable HASKELL-TRADER
     import:           warnings
     main-is:          Main.hs
