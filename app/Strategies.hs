@@ -1,13 +1,19 @@
 module Strategies
-    ( simpleStrategy
+    ( module Strategies.Simple
+    , module Strategies.Momentum
+    , module Strategies.MeanReversion
+    , module Strategies.RangeBreakout
+    , module Strategies.RSI
+    , module Strategies.MA
+    , module Strategies.StatefulRunner
+    , module Strategies.EmaReclaim
     ) where
 
-import Backtest
-
-simpleStrategy :: Strategy -- basic strategy for testing
-simpleStrategy marketData
-    | closePrice marketData > openPrice marketData = Buy 1
-    | closePrice marketData < openPrice marketData = Sell 1
-    | otherwise = Hold
-
--- add strategies here. can have user toggle through them and backtest
+import Strategies.Simple
+import Strategies.Momentum
+import Strategies.MeanReversion
+import Strategies.RangeBreakout
+import Strategies.RSI
+import Strategies.MA
+import Strategies.StatefulRunner
+import Strategies.EmaReclaim
