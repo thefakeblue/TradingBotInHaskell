@@ -22,7 +22,10 @@ main = withSocketsDo $ do
 
     existingTimes <- loadExistingTimestamps "trades.csv"
 
-    handle <- openFile "trades.csv" AppendMode
+    -- open CSV file once
+    handle <- openFile "1YearHistoricalData10Min.csv" AppendMode
+
+    stateRef <- newIORef initialBacktestState -- added by storey
 
     stateRef  <- newIORef initialBacktestState
     timeSetRef <- newIORef existingTimes

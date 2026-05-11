@@ -28,15 +28,56 @@ executable CsvReplay
 executable HASKELL-TRADER
     import:           warnings
     main-is:          Main.hs
-    other-modules:    Backtest, Strategies, TUI
-    build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory, layoutz
+    other-modules:
+        Backtest
+      , Strategies
+      , Strategies.Simple
+      , Strategies.Momentum
+      , Strategies.MeanReversion
+      , Strategies.RangeBreakout
+      , Strategies.RSI
+      , Strategies.MA
+      , Strategies.StatefulRunner
+      , Strategies.EmaReclaim
+      , Strategies.Custom
+    build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010
 
 executable fetch-data
     import:           warnings
     main-is:          fetchdata.hs
-    other-modules:    Backtest, Strategies
+    other-modules:
+        Backtest
+      , Strategies
+      , Strategies.Simple
+      , Strategies.Momentum
+      , Strategies.MeanReversion
+      , Strategies.RangeBreakout
+      , Strategies.RSI
+      , Strategies.MA
+      , Strategies.StatefulRunner
+      , Strategies.EmaReclaim
+      , Strategies.Custom
     build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory
+    hs-source-dirs:   app
+    default-language: Haskell2010
+
+executable csv-replay
+    import:           warnings
+    main-is:          CsvReplay.hs
+    other-modules:
+        Backtest
+      , Strategies
+      , Strategies.Simple
+      , Strategies.Momentum
+      , Strategies.MeanReversion
+      , Strategies.RangeBreakout
+      , Strategies.RSI
+      , Strategies.MA
+      , Strategies.StatefulRunner
+      , Strategies.EmaReclaim
+      , Strategies.Custom
+    build-depends:    base ^>=4.18.3.0, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010

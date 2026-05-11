@@ -1,0 +1,29 @@
+Resolving dependencies...
+Starting strategy search...
+--- Testing on 1YearHistoricalData10Min.csv (35261 candles) ---
+*** HIT 1k net profit: rangeBreakoutStrategy 0.1 on 1YearHistoricalData10Min.csv -> 1049.25
+*** HIT 1k net profit: customTrendBreakout 0.15 1.0e-3 on 1YearHistoricalData10Min.csv -> 1189.25
+*** HIT 1k net profit: customRangeReversion 0.45 0.2 on 1YearHistoricalData10Min.csv -> 1095.5
+*** HIT 1k net profit: customRangeReversion 0.45 0.25 on 1YearHistoricalData10Min.csv -> 1524.0
+*** HIT 1k net profit: customRangeReversion 0.5 0.2 on 1YearHistoricalData10Min.csv -> 1147.75
+*** HIT 1k net profit: customRangeReversion 0.5 0.25 on 1YearHistoricalData10Min.csv -> 1456.75
+*** HIT 1k net profit: customRangeReversion 0.55 0.2 on 1YearHistoricalData10Min.csv -> 1288.5
+*** HIT 1k net profit: customRangeReversion 0.55 0.25 on 1YearHistoricalData10Min.csv -> 1412.25
+*** HIT 1k net profit: customRangeReversion 0.6 0.25 on 1YearHistoricalData10Min.csv -> 1050.5
+*** HIT 1k net profit: stepRSIStrategy 30.0 80.0 on 1YearHistoricalData10Min.csv -> 1254.25
+*** HIT 1k net profit: stepRSIStrategy 40.0 70.0 on 1YearHistoricalData10Min.csv -> 1274.5
+*** HIT 1k net profit: stepATRTrendStrategy 20 1.05 on 1YearHistoricalData10Min.csv -> 1043.75
+*** HIT 1k net profit: stepEMABreakoutStrategy 12 on 1YearHistoricalData10Min.csv -> 1360.0
+--- Testing on 1YearHistoricalData5Min.csv (70526 candles) ---
+*** HIT 1k net profit: momentumStrategy 1.0e-3 on 1YearHistoricalData5Min.csv -> 1058.0
+*** HIT 1k net profit: rangeBreakoutStrategy 0.1 on 1YearHistoricalData5Min.csv -> 1004.0
+*** HIT 1k net profit: customRangeReversion 0.45 0.2 on 1YearHistoricalData5Min.csv -> 1294.5
+*** HIT 1k net profit: customRangeReversion 0.45 0.25 on 1YearHistoricalData5Min.csv -> 1260.5
+*** HIT 1k net profit: customRangeReversion 0.5 0.2 on 1YearHistoricalData5Min.csv -> 1349.5
+*** HIT 1k net profit: customRangeReversion 0.5 0.25 on 1YearHistoricalData5Min.csv -> 1238.75
+*** HIT 1k net profit: customRangeReversion 0.55 0.2 on 1YearHistoricalData5Min.csv -> 1451.75
+*** HIT 1k net profit: customRangeReversion 0.55 0.25 on 1YearHistoricalData5Min.csv -> 1287.75
+*** HIT 1k net profit: customRangeReversion 0.6 0.2 on 1YearHistoricalData5Min.csv -> 1070.0
+*** HIT 1k net profit: stepRSIStrategy 30.0 80.0 on 1YearHistoricalData5Min.csv -> 1247.5
+*** HIT 1k net profit: stepMAStrategy 9 21 on 1YearHistoricalData5Min.csv -> 1009.0
+^C

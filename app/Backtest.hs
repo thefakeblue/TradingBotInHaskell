@@ -10,7 +10,7 @@ module Backtest
     , runBacktest
      ) where
 
-import Data.Time
+import Data.Time (UTCTime)
 
 data Decision
     = Buy Double
@@ -43,28 +43,30 @@ candleMomentum marketData =
 type Strategy = MarketData -> Decision
 
 data BacktestState = BacktestState
-    { cash :: Double
-    , quantityOwned :: Double
-    , averagePrice :: Double
-    , netProfit :: Double
-    , grossProfit :: Double
-    , grossLoss :: Double
-    , winningTrades :: Int
-    , losingTrades :: Int
-    , totalTrades :: Int
+    { cash :: Double, -- current cash holding
+      quantityOwned :: Double, -- quantity of asset owned
+      averagePrice :: Double, -- average price of owned asset
+      netProfit :: Double,
+      grossProfit :: Double,
+      grossLoss :: Double,
+      winningTrades :: Int, -- number of winning trades
+      losingTrades :: Int, -- number of losing trades
+      totalTrades :: Int, -- total number of trades executed
+      lastDecision :: Decision -- last signal direction seen by the backtest
      } deriving (Show, Eq)
 
 initialBacktestState :: BacktestState
 initialBacktestState = BacktestState
-    { cash = 10000
-    , quantityOwned = 0
-    , averagePrice = 0
-    , netProfit = 0
-    , grossProfit = 0
-    , grossLoss = 0
-    , winningTrades = 0
-    , losingTrades = 0
-    , totalTrades = 0
+    { cash = 10000, -- can adjust or make this an input parameter
+      quantityOwned = 0,
+      averagePrice = 0,
+      netProfit = 0,
+      grossProfit = 0,
+      grossLoss = 0,
+      winningTrades = 0,
+      losingTrades = 0,
+      totalTrades = 0,
+      lastDecision = Hold
     }
 
 stepBacktest :: Strategy -> BacktestState -> MarketData -> BacktestState
@@ -72,34 +74,34 @@ stepBacktest strategy state marketData =
     case strategy marketData of
         Buy amount ->
             if amount <= 0 || cash state < amount * closePrice marketData
-            then state
-            else
-                let oldQuantity = quantityOwned state
-                    newQuantity = oldQuantity + amount
-                    price = closePrice marketData
-                    oldAveragePrice = averagePrice state
-                    newAveragePrice =
-                        if oldQuantity == 0
-                        then price
-                        else ((oldQuantity * oldAveragePrice) + (amount * price)) / newQuantity
-                    newCash = cash state - amount * price
-                in state
-                    { quantityOwned = newQuantity
-                    , averagePrice = newAveragePrice
-                    , cash = newCash
-                    }
-
+                then state { lastDecision = Buy 0 }
+                else
+                    let oldQuantity = quantityOwned state
+                        newQuantity = oldQuantity + amount
+                        price = closePrice marketData
+                        oldAveragePrice = averagePrice state
+                        newAveragePrice = 
+                            if oldQuantity == 0 
+                            then price 
+                            else ((oldQuantity*oldAveragePrice) + (amount*price)) / newQuantity
+                        newCash = cash state - amount * price
+                    in state
+                        { quantityOwned = newQuantity
+                        , averagePrice = newAveragePrice
+                        , cash = newCash
+                        , lastDecision = Buy 0
+                        }
         Sell amount ->
-            if amount <= 0 || quantityOwned state < amount
-            then state
+            if amount <= 0 || quantityOwned state <= 0
+            then state { lastDecision = Sell 0 }
             else
-                let price = closePrice marketData
+                let closeQty = quantityOwned state
+                    price = closePrice marketData
                     profitPerUnit = price - averagePrice state
-                    totalProfit = profitPerUnit * amount
-                    newQuantity = quantityOwned state - amount
-                    newCash = cash state + amount * price
+                    totalProfit = profitPerUnit * closeQty -- close entire long position
+                    newCash = cash state + closeQty * price
                 in state
-                    { quantityOwned = newQuantity
+                    { quantityOwned = 0
                     , cash = newCash
                     , netProfit = netProfit state + totalProfit
                     , grossProfit = grossProfit state + max totalProfit 0
@@ -107,9 +109,9 @@ stepBacktest strategy state marketData =
                     , winningTrades = winningTrades state + if totalProfit > 0 then 1 else 0
                     , losingTrades = losingTrades state + if totalProfit < 0 then 1 else 0
                     , totalTrades = totalTrades state + 1
-                    , averagePrice = if newQuantity == 0 then 0 else averagePrice state
+                    , averagePrice = 0
+                    , lastDecision = Sell 0
                     }
-
         Hold -> state
 
 runBacktest :: Strategy -> [MarketData] -> BacktestState

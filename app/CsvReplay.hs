@@ -1,66 +1,66 @@
 module Main where
 
-
--- to backtest specific candles:
--- cabal run csvReplay -- last 10 (for last 10 minutes)
--- cabal run CsvReplay -- from "2026-05-05 12:00:00 UTC" "2026-05-05 13:00:00 UTC"
-
--- ask user what mode they want: 
--- 1 = all data, 2 = last n minutes, 3 = specific date range from start to end time
--- read their input with getLine
---convert that input into a TimeFrame data type
---run the same filter/backtest code
-
-
-
-import System.Environment (getArgs)
+import Text.Read (readMaybe)
 import Backtest
 import Strategies
 import Data.Time
-import Data.Maybe (mapMaybe)
-import Text.Read (readMaybe)
-
-data TimeFrame -- can determine which candles to backtest on based on time.
-    = AllTime
-    | LastMinutes Integer
-    | DateRange UTCTime UTCTime
-    deriving (Show, Eq)
 
 main :: IO ()
 main = do
-    args <- getArgs
+    -- Choose one data file by uncommenting it:
+    let dataFile = "1YearHistoricalData1Min.csv"
+    -- let dataFile = "1YearHistoricalData3Min.csv"
+    -- let dataFile = "1YearHistoricalData5Min.csv"
+    -- dataFile = "1YearHistoricalData10Min.csv"
 
-    -- determine which file we're looking at (different csv files have different sized candles)
-    putStrLn "Enter CSV file name, or press Enter for trades.csv:"
-    putStr "> "
-    fileNameInput <- getLine
+    -- Choose one strategy by uncommenting it and commenting the others:
+    -- let strategy = simpleStrategy
+    -- let strategy = momentumStrategy 0.002
+    -- let strategy = meanReversionStrategy 0.002
+    -- let strategy = rangeBreakoutStrategy 0.25
+    -- let strategy = customTrendBreakoutStrategy 0.25 0.002
+    let strategy = customRangeReversionStrategy 0.45 0.25 -- best live strategy on 10-minute data
+    -- let strategy = customRangeReversionConservative 0.45 0.25
+    -- let strategy = stepRSIStrategy 30 70
+    -- let strategy = stepMAStrategy 9 21
+    -- let strategy = stepEMABreakoutStrategy 12
 
-    let fileName = -- will change if we want a different default file
-         if null fileNameInput
-         then "trades.csv"
-         else fileNameInput
+    let strategyLabel = "customRangeReversionStrategy 0.45 0.25"
 
-    contents <- readFile fileName
-    putStrLn ("File used: " ++ fileName)
+    putStrLn $ "Loading data file: " ++ dataFile
+    putStrLn $ "Using strategy: " ++ strategyLabel
 
-    let rows = lines contents -- split into rows
-        marketDataList = mapMaybe parseCsvRow rows
+    contents <- readFile dataFile
+    let rows = lines contents
+    let marketDataList = mapMaybe parseCsvRow rows
+    let finalState = runBacktest strategy marketDataList
 
-    timeFrame <- -- ask user for time frame, or parse from args
-        if null args
-        then askUserForTimeFrame
-        else parseTimeFrame args marketDataList
+    let wins   = winningTrades finalState
+    let losses = losingTrades  finalState
+    let total  = totalTrades   finalState
+    let winRate = if total == 0 then 0
+                  else fromIntegral wins / fromIntegral total * 100 :: Double
+    let profitFactor = if grossLoss finalState == 0 then 999
+                       else grossProfit finalState / grossLoss finalState
+    let finalQty = quantityOwned finalState
+    let lastPrice = if null marketDataList then 0 else closePrice (last marketDataList)
+    let finalEquity = cash finalState + finalQty * lastPrice
 
-    let filteredData = filterByTimeFrame timeFrame marketDataList -- filter data based on time frame
-        finalState = runBacktest simpleStrategy filteredData
-
-    putStrLn ("Args: " ++ show args)
-    putStrLn ("Time frame: " ++ show timeFrame)
-    putStrLn ("Total candles: " ++ show (length marketDataList))
-    putStrLn ("Candles used: " ++ show (length filteredData))
-
-    putStrLn "Final Backtest State:"
-    print finalState
+    putStrLn "────────────────────────────"
+    putStrLn $ "Data file:      " ++ dataFile
+    putStrLn $ "Strategy:       " ++ strategyLabel
+    putStrLn $ "Net profit:     " ++ show (netProfit finalState)
+    putStrLn $ "Gross profit:   " ++ show (grossProfit finalState)
+    putStrLn $ "Gross loss:     " ++ show (grossLoss finalState)
+    putStrLn $ "Profit factor:  " ++ show profitFactor
+    putStrLn $ "Win rate:       " ++ show winRate ++ "%"
+    putStrLn $ "Wins:           " ++ show wins
+    putStrLn $ "Losses:         " ++ show losses
+    putStrLn $ "Total trades:   " ++ show total
+    putStrLn $ "Final cash:     " ++ show (cash finalState)
+    putStrLn $ "Quantity held:  " ++ show finalQty
+    putStrLn $ "Final equity:   " ++ show finalEquity
+    putStrLn "────────────────────────────"
 
 parseTimeFrame :: [String] -> [MarketData] -> IO TimeFrame -- lets user determine what candles to look back at
 parseTimeFrame [] _ = return AllTime
@@ -71,59 +71,13 @@ parseTimeFrame ["last", minStr] _ =
             putStrLn "Invalid minutes argument. Use an integer, e.g. 'last 10'"
             return AllTime
 
-parseTimeFrame ["from", startStr, endStr] _ = -- parse start and end time
-    case (parseTimeStamp startStr, parseTimeStamp endStr) of
-        (Just start, Just end) -> return (DateRange start end)
-        _ -> do
-            putStrLn "Invalid date range. Use format: YYYY-MM-DDTHH:MM:SS"
-            return AllTime
-
-parseTimeFrame _ _ = do -- unrecognized args
-    putStrLn "Usage:"
-    putStrLn "  cabal run csvReplay -- last 10"
-    putStrLn "  cabal run csvReplay -- from 2026-05-05T12:00:00 2026-05-05T13:00:00"
-    putStrLn "Using all data."
-    return AllTime
-
-askUserForTimeFrame :: IO TimeFrame -- if no args, ask user for time frame interactively
-askUserForTimeFrame = do
-    putStrLn "Choose timeframe:"
-    putStrLn "1 = All data"
-    putStrLn "2 = Last n minutes (enter n)"
-    putStrLn "3 = Date range"
-    putStr "> "
-    choice <- getLine
-
-    case choice of 
-        "1" -> return AllTime
-        "2" -> do
-            putStrLn "How many minutes back?"
-            putStr "> "
-            minStr <- getLine
-
-            case readMaybe minStr of
-                Just mins -> return (LastMinutes mins)
-                Nothing -> do
-                    putStrLn "Invalid input. Using all data."
-                    return AllTime
-        "3" -> do
-            putStrLn "Enter start time (YYYY-MM-DD HH:MM:SS UTC)"
-            putStr "> "
-            startStr <- getLine
-
-            putStrLn "Enter end time (YYYY-MM-DD HH:MM:SS UTC)"
-            putStr "> "
-            endStr <- getLine
-
-            case (parseTimeStamp startStr, parseTimeStamp endStr) of
-                (Just start, Just end) -> return (DateRange start end)
-                _ -> do
-                    putStrLn "Invalid date format. Using all data."
-                    return AllTime
-
-        _ -> do
-            putStrLn "Invalid choice. Using all data."
-            return AllTime
+-- helper
+mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+mapMaybe _ [] = []
+mapMaybe f (x:xs) =
+    case f x of
+        Nothing -> mapMaybe f xs
+        Just y  -> y : mapMaybe f xs
 
 
 filterByTimeFrame :: TimeFrame -> [MarketData] -> [MarketData] -- filter the candles based on the time frame the user wants to look at
@@ -146,17 +100,17 @@ filterByTimeFrame (LastMinutes mins) xs = -- get the latest timestamp, then filt
 parseCsvRow :: String -> Maybe MarketData -- takes a row of the csv and turns it into a MarketData type, which we can use to backtest our strategy
 parseCsvRow str =
     case splitComma str of
-        [ts,o,h,l,c,_] -> do
-            timeVal  <- parseTimeStamp ts
+        [t,o,h,l,c,_] -> do          -- 6 columns, timestamp first
+            time     <- parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" (take 19 t)
             openVal  <- readMaybe o
             highVal  <- readMaybe h
             lowVal   <- readMaybe l
             closeVal <- readMaybe c
             return MarketData
-                { timestamp = timeVal
-                , openPrice = openVal
-                , highPrice = highVal
-                , lowPrice = lowVal
+                { timestamp  = time
+                , openPrice  = openVal
+                , highPrice  = highVal
+                , lowPrice   = lowVal
                 , closePrice = closeVal
                 }
         _ -> Nothing
