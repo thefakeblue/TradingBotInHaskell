@@ -21,7 +21,8 @@ main = withSocketsDo $ do
     -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
-    stateRef <- newIORef initialBacktestState
+    stateRef  <- newIORef initialBacktestState
+    tuiHandle <- newTuiHandle
 
     -- socket server on background thread; TUI owns the main thread
     _ <- forkIO $ do
@@ -83,7 +84,7 @@ handleClient conn handle stateRef tuiHandle = do
                     hFlush handle  -- force save immediately
 
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
-            handleClient conn handle stateRef
+            handleClient conn handle stateRef tuiHandle
 
 parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =

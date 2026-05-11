@@ -5,6 +5,11 @@ import Backtest
 import Strategies
 import Data.Time
 
+data TimeFrame
+    = AllTime
+    | DateRange UTCTime UTCTime
+    | LastMinutes Integer
+
 main :: IO ()
 main = do
     -- Choose one data file by uncommenting it:
