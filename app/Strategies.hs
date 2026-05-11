@@ -7,6 +7,7 @@ module Strategies
     , module Strategies.MA
     , module Strategies.StatefulRunner
     , module Strategies.EmaReclaim
+    , module Strategies.Custom
     ) where
 
 import Strategies.Simple
@@ -17,3 +18,4 @@ import Strategies.RSI
 import Strategies.MA
 import Strategies.StatefulRunner
 import Strategies.EmaReclaim
+import Strategies.Custom

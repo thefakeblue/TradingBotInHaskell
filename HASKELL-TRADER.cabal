@@ -26,6 +26,7 @@ executable HASKELL-TRADER
       , Strategies.MA
       , Strategies.StatefulRunner
       , Strategies.EmaReclaim
+      , Strategies.Custom
     build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010
@@ -44,6 +45,7 @@ executable fetch-data
       , Strategies.MA
       , Strategies.StatefulRunner
       , Strategies.EmaReclaim
+      , Strategies.Custom
     build-depends:    base ^>=4.18.3.0, network, bytestring, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010
@@ -62,6 +64,7 @@ executable csv-replay
       , Strategies.MA
       , Strategies.StatefulRunner
       , Strategies.EmaReclaim
+      , Strategies.Custom
     build-depends:    base ^>=4.18.3.0, time, containers, directory
     hs-source-dirs:   app
     default-language: Haskell2010

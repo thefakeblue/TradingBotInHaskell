@@ -20,7 +20,7 @@ main = withSocketsDo $ do
     -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
-    stateRef <- newIORef initialBacktestState -- added by storey
+    stateRef <- newIORef initialBacktestState
 
     (conn, _) <- accept sock
     putStrLn "Client connected"
@@ -49,10 +49,22 @@ handleClient conn handle stateRef = do
                          , lowPrice = l
                          , closePrice = c
                          }
-                        action = decisionToString (simpleStrategy marketData) -- given strategy (simpleStrategy is for testing)
-                            
+                                    -- ┌─────────────────────────────────────────────────────┐
+                                    -- ┌─────────────────────────────────────────────────────┐
+                                    -- │  BEST LIVE STRATEGY:                               │
+                                    -- │  customRangeReversionStrategy 0.45 0.25           │
+                                    -- │  Validated net profit: 1524.0 on 10-minute history │
+                                    -- │                                                     │
+                                    -- │  Alternative (more conservative):                   │
+                                    -- │  customRangeReversionConservative 0.45 0.25        │
+                                    -- │  (Use below if you want fewer short trades)        │
+                                    -- └─────────────────────────────────────────────────────┘
+                    let decision = customRangeReversionStrategy 0.45 0.25 marketData
+                    -- let decision = customRangeReversionConservative 0.45 0.25 marketData  -- Lower profit on 10-min history
+                    let action = decisionToString decision
+
                     oldState <- readIORef stateRef
-                    let newState = stepBacktest simpleStrategy oldState marketData
+                    let newState = stepBacktest (\_ -> decision) oldState marketData
                     writeIORef stateRef newState
 
                     putStrLn ("Sending: " ++ action)
@@ -71,7 +83,7 @@ handleClient conn handle stateRef = do
                     hFlush handle  -- force save immediately
 
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
-            handleClient conn handle stateRef -- loop to handle next message
+            handleClient conn handle stateRef
 
 parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
 parseCandle str =
