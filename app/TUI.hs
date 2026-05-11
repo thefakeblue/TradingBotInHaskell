@@ -1,4 +1,4 @@
-module TUI (TuiHandle, newTuiHandle, runTUI, updateTUI) where
+module TUI (TuiHandle, newTuiHandle, runTUI, updateTUI, setTuiTotal) where
 
 import Layoutz
 import Backtest
@@ -18,34 +18,49 @@ import System.IO.Unsafe (unsafePerformIO)
 -- ─────────────────────────────────────────────
 
 data TuiState = TuiState
-    { tuiBacktest      :: BacktestState
-    , tuiLastCandle    :: Maybe MarketData
-    , tuiLastDecision  :: Maybe Decision
-    , tuiLogs          :: [(Maybe Decision, String)]  -- newest first, capped at 100
-    , tuiConnected     :: Bool
-    , tuiCandleCount   :: Int
-    , tuiEquityHistory :: [Double]                    -- newest first, capped at 60
-    , tuiPeakEquity    :: Double
-    , tuiMaxDrawdown   :: Double
+    { tuiBacktest        :: BacktestState
+    , tuiLastCandle      :: Maybe MarketData
+    , tuiLastDecision    :: Maybe Decision
+    , tuiLogs            :: [(Maybe Decision, String)]  -- newest first, capped at 100
+    , tuiConnected       :: Bool
+    , tuiCandleCount     :: Int
+    , tuiEquityHistory   :: [Double]                    -- newest first, capped at 60
+    , tuiPeakEquity      :: Double
+    , tuiMaxDrawdown     :: Double
+    , tuiCandleHistory   :: [MarketData]                -- newest first, capped at 20
+    , tuiCandleDecisions :: [Decision]                  -- parallel to tuiCandleHistory
+    , tuiTotalCandles    :: Maybe Int                   -- set for CSV replay
+    , tuiIsReplay        :: Bool
     }
 
 initialTuiState :: TuiState
 initialTuiState = TuiState
-    { tuiBacktest      = initialBacktestState
-    , tuiLastCandle    = Nothing
-    , tuiLastDecision  = Nothing
-    , tuiLogs          = [(Nothing, "[--:--:--] Waiting for connection on port 5001...")]
-    , tuiConnected     = False
-    , tuiCandleCount   = 0
-    , tuiEquityHistory = []
-    , tuiPeakEquity    = 0
-    , tuiMaxDrawdown   = 0
+    { tuiBacktest        = initialBacktestState
+    , tuiLastCandle      = Nothing
+    , tuiLastDecision    = Nothing
+    , tuiLogs            = [(Nothing, "[--:--:--] Waiting for connection on port 5001...")]
+    , tuiConnected       = False
+    , tuiCandleCount     = 0
+    , tuiEquityHistory   = []
+    , tuiPeakEquity      = 0
+    , tuiMaxDrawdown     = 0
+    , tuiCandleHistory   = []
+    , tuiCandleDecisions = []
+    , tuiTotalCandles    = Nothing
+    , tuiIsReplay        = False
     }
 
 newtype TuiHandle = TuiHandle (IORef TuiState)
 
 newTuiHandle :: IO TuiHandle
 newTuiHandle = TuiHandle <$> newIORef initialTuiState
+
+setTuiTotal :: TuiHandle -> Int -> IO ()
+setTuiTotal (TuiHandle ref) n = modifyIORef ref $ \s ->
+    s { tuiTotalCandles = Just n
+      , tuiIsReplay     = True
+      , tuiLogs         = [(Nothing, "Loaded " ++ show n ++ " candles – starting replay...")]
+      }
 
 updateTUI :: TuiHandle -> BacktestState -> MarketData -> Decision -> IO ()
 updateTUI (TuiHandle ref) bs md dec = do
@@ -59,15 +74,17 @@ updateTUI (TuiHandle ref) bs md dec = do
             dd    = if peak > 0 then (peak - currentEquity) / peak * 100 else 0
             maxDd = max (tuiMaxDrawdown s) dd
         in s
-            { tuiBacktest      = bs
-            , tuiLastCandle    = Just md
-            , tuiLastDecision  = Just dec
-            , tuiCandleCount   = tuiCandleCount s + 1
-            , tuiConnected     = True
-            , tuiLogs          = take 100 ((Just dec, logLine) : tuiLogs s)
-            , tuiEquityHistory = take 60 (currentEquity : tuiEquityHistory s)
-            , tuiPeakEquity    = peak
-            , tuiMaxDrawdown   = maxDd
+            { tuiBacktest        = bs
+            , tuiLastCandle      = Just md
+            , tuiLastDecision    = Just dec
+            , tuiCandleCount     = tuiCandleCount s + 1
+            , tuiConnected       = True
+            , tuiLogs            = take 100 ((Just dec, logLine) : tuiLogs s)
+            , tuiEquityHistory   = take 60  (currentEquity : tuiEquityHistory s)
+            , tuiPeakEquity      = peak
+            , tuiMaxDrawdown     = maxDd
+            , tuiCandleHistory   = take 20 (md  : tuiCandleHistory s)
+            , tuiCandleDecisions = take 20 (dec : tuiCandleDecisions s)
             }
 
 -- ─────────────────────────────────────────────
@@ -94,7 +111,7 @@ runTUI h = runApp $ LayoutzApp
     { appInit          = (AppModel h ViewDashboard 0, CmdNone)
     , appUpdate        = handleMsg
     , appSubscriptions = \_ -> subBatch
-        [ subEveryMs 500 Tick
+        [ subEveryMs 250 Tick
         , subKeyPress (Just . KeyPress)
         ]
     , appView          = \m ->
@@ -142,6 +159,9 @@ fmtSigned x
 
 fmtTime :: UTCTime -> String
 fmtTime = formatTime defaultTimeLocale "%H:%M:%S"
+
+fmtDateTime :: UTCTime -> String
+fmtDateTime = formatTime defaultTimeLocale "%m/%d %H:%M"
 
 padL :: Int -> String -> String
 padL n s = let t = take n s in replicate (n - length t) ' ' ++ t
@@ -194,6 +214,82 @@ navbar v =
         ]
 
 -- ─────────────────────────────────────────────
+--  ASCII Candlestick Chart
+-- ─────────────────────────────────────────────
+
+chartH :: Int
+chartH = 10
+
+chartN :: Int
+chartN = 20
+
+data CellKind = BullBody | BearBody | WickCell | EmptyCell
+
+-- Determine what to draw at a given chart row for one candle.
+candleCellKind :: Int -> MarketData -> Double -> Double -> CellKind
+candleCellKind rowIdx md minP maxP
+    | maxP == minP             = EmptyCell
+    | rowIdx >= bodyTop
+      && rowIdx <= bodyBottom  = if bullish then BullBody else BearBody
+    | rowIdx >= hiRow
+      && rowIdx <= loRow       = WickCell
+    | otherwise                = EmptyCell
+  where
+    rng        = maxP - minP
+    clamp v    = max 0 (min (chartH - 1) v)
+    toRow p    = clamp $ round ((maxP - p) / rng * fromIntegral (chartH - 1))
+    hiRow      = toRow (highPrice md)
+    loRow      = toRow (lowPrice md)
+    opnRow     = toRow (openPrice md)
+    clsRow     = toRow (closePrice md)
+    bodyTop    = min opnRow clsRow
+    bodyBottom = max opnRow clsRow
+    bullish    = closePrice md >= openPrice md
+
+-- One horizontal row of the chart (price label + one cell per candle).
+renderChartRow :: [MarketData] -> Double -> Double -> Int -> L
+renderChartRow candles minP maxP rowIdx =
+    let priceAtRow = maxP - fromIntegral rowIdx / fromIntegral (chartH - 1) * (maxP - minP)
+        label      = dim $ green $ text (padL 8 (fmt2 priceAtRow) ++ " │")
+        mkCell md  = case candleCellKind rowIdx md minP maxP of
+            BullBody  -> brightGreen $ text " █ "
+            BearBody  -> red         $ text " █ "
+            WickCell  -> dim $ green $ text " │ "
+            EmptyCell -> text "   "
+    in row (label : map mkCell candles)
+
+-- Signal markers drawn below the axis (B / S / ·).
+renderSignalRow :: [Decision] -> L
+renderSignalRow decs =
+    let indent = text (replicate 10 ' ')
+        mkSig d = case d of
+            Buy  _ -> brightGreen $ text " B "
+            Sell _ -> red         $ text " S "
+            Hold   -> dim $ text " · "
+    in row (indent : map mkSig decs)
+
+candleChartPanel :: TuiState -> L
+candleChartPanel s =
+    let displayed = reverse $ take chartN (tuiCandleHistory   s)
+        decisions = reverse $ take chartN (tuiCandleDecisions s)
+        body
+            | null displayed = [dim $ text "  Waiting for candle data..."]
+            | otherwise =
+                let allPrices  = concatMap (\md -> [highPrice md, lowPrice md]) displayed
+                    minP       = minimum allPrices
+                    maxP       = maximum allPrices
+                    chartRows  = map (renderChartRow displayed minP maxP) [0..chartH-1]
+                    axisLine   = dim $ green $ text
+                        (replicate 9 ' ' ++ "└" ++ concat (replicate (length displayed) "───"))
+                    timeRange  =
+                        let t0 = fmtDateTime (timestamp (head displayed))
+                            t1 = fmtDateTime (timestamp (last displayed))
+                        in dim $ green $ text ("   " ++ t0 ++ " ──► " ++ t1)
+                    sigRow     = renderSignalRow decisions
+                in chartRows ++ [axisLine, sigRow, timeRange]
+    in withBorder BorderDouble $ green $ section "Candle Chart  (green=bull  red=bear  B=buy  S=sell)" body
+
+-- ─────────────────────────────────────────────
 --  Panels
 -- ─────────────────────────────────────────────
 
@@ -213,48 +309,61 @@ portfolioPanel bs =
 
 statusPanel :: TuiState -> L
 statusPanel s =
-    let connLabel = if tuiConnected s
-                        then brightGreen $ bold $ text "● CONNECTED"
-                        else red         $ bold $ text "○ NO CLIENT"
-        lastDec   = case tuiLastDecision s of
-                        Nothing -> dim $ text "---"
-                        Just d  -> decColor d $ bold $ text (decisionToString d)
-        bs = tuiBacktest s
+    let bs = tuiBacktest s
+        connLabel
+            | tuiIsReplay s  = yellow      $ bold $ text "⏵ CSV REPLAY"
+            | tuiConnected s = brightGreen $ bold $ text "● CONNECTED"
+            | otherwise      = red         $ bold $ text "○ WAITING..."
+        lastDec = case tuiLastDecision s of
+            Nothing -> dim $ text "---"
+            Just d  -> decColor d $ bold $ text (decisionToString d)
+        progress = case tuiTotalCandles s of
+            Nothing -> show (tuiCandleCount s)
+            Just n  ->
+                let pct = if n == 0 then 0 else tuiCandleCount s * 100 `div` n :: Int
+                in show (tuiCandleCount s) ++ "/" ++ show n
+                   ++ " (" ++ show pct ++ "%)"
+        ohlcRow = case tuiLastCandle s of
+            Nothing -> dim $ text "  No candle data yet"
+            Just md ->
+                row [ green $ statusCard "O" (padL 8 $ fmtUSD (openPrice  md))
+                    , brightGreen $ statusCard "H" (padL 8 $ fmtUSD (highPrice  md))
+                    , red         $ statusCard "L" (padL 8 $ fmtUSD (lowPrice   md))
+                    , green $ statusCard "C" (padL 8 $ fmtUSD (closePrice md))
+                    ]
+        momRow = case tuiLastCandle s of
+            Nothing -> dim $ text ""
+            Just md ->
+                let mom = candleMomentum md
+                in row [ pnlColor mom $ statusCard "Momentum" (padL 9 $ fmtSigned mom)
+                       , statusCard "Range" (padL 9 $ fmtUSD (highPrice md - lowPrice md))
+                       ]
+        timeRow = case tuiLastCandle s of
+            Nothing -> dim $ text ""
+            Just md -> dim $ green $ text ("  " ++ fmtDateTime (timestamp md))
     in withBorder BorderDouble $ green $ section "Bot Status"
         [ row [ connLabel ]
         , br
-        , row [ statusCard "Candles"  (padL 6 $ show (tuiCandleCount s))
+        , row [ statusCard "Candles"  (padL 20 progress)
               , statusCard "Trades"   (padL 6 $ show (totalTrades bs))
-              , statusCard "Win Rate" (padL 8 $ winRate bs)
               ]
         , br
-        , row [ statusCard "Last Signal" "  ", lastDec ]
+        , row [ statusCard "Win Rate" (padL 8 $ winRate bs)
+              , statusCard "Last Signal" "  ", lastDec
+              ]
         , br
         , row [ statusCard "Qty Held"  (padL 8 $ fmt2 (quantityOwned bs))
               , statusCard "Avg Entry" (padL 10 $ if quantityOwned bs == 0
                                                   then "---"
                                                   else fmtUSD (averagePrice bs))
               ]
+        , br
+        , ohlcRow
+        , br
+        , momRow
+        , br
+        , timeRow
         ]
-
-candlePanel :: TuiState -> L
-candlePanel s =
-    let body = case tuiLastCandle s of
-                 Nothing -> [dim $ text "Waiting for first candle..."]
-                 Just md ->
-                     let mom = candleMomentum md
-                     in [ row [ statusCard "Open"  (padL 10 $ fmtUSD (openPrice  md))
-                              , statusCard "High"  (padL 10 $ fmtUSD (highPrice  md))
-                              , statusCard "Low"   (padL 10 $ fmtUSD (lowPrice   md))
-                              , statusCard "Close" (padL 10 $ fmtUSD (closePrice md))
-                              ]
-                        , br
-                        , row [ pnlColor mom $ statusCard "Momentum" (padL 9 $ fmtSigned mom)
-                              , statusCard "Range" (padL 9 $ fmtUSD (highPrice md - lowPrice md))
-                              , statusCard "Time"  (padL 10 $ fmtTime (timestamp md))
-                              ]
-                        ]
-    in withBorder BorderDouble $ green $ section "Live Candle" body
 
 sparklinePanel :: TuiState -> L
 sparklinePanel s =
@@ -271,10 +380,10 @@ sparklinePanel s =
     in withBorder BorderDouble $ green $ section "Equity Curve (last 60 candles)" body
 
 logEntry :: (Maybe Decision, String) -> L
-logEntry (Nothing,       s) = dim $ green   $ text ("  " ++ s)
-logEntry (Just (Buy  _), s) = brightGreen   $ text ("  " ++ s)
-logEntry (Just (Sell _), s) = red           $ text ("  " ++ s)
-logEntry (Just Hold,     s) = yellow        $ text ("  " ++ s)
+logEntry (Nothing,       s) = dim $ green  $ text ("  " ++ s)
+logEntry (Just (Buy  _), s) = brightGreen  $ text ("  " ++ s)
+logEntry (Just (Sell _), s) = red          $ text ("  " ++ s)
+logEntry (Just Hold,     s) = yellow       $ text ("  " ++ s)
 
 logPanel :: TuiState -> L
 logPanel s =
@@ -290,18 +399,14 @@ dashboardView s = layout
     [ row [ portfolioPanel (tuiBacktest s)
           , text "  "
           , statusPanel s
-          , text "  "
-          , candlePanel s
           ]
+    , br
+    , candleChartPanel s
     , br
     , sparklinePanel s
     , br
     , logPanel s
     ]
-
-{-
-- TODO - Add the start balance value to from line 59 backtest code
--}
 
 logHistoryView :: AppModel -> TuiState -> L
 logHistoryView m s =
@@ -342,14 +447,14 @@ statsView s =
                   , red                      $ statusCard "Gross Loss"    (padL 11 $ fmtUSD (grossLoss bs))
                   ]
             , br
-            , row [ brightGreen $ statusCard "Avg Win"        (padL 11 $ fmtUSD avgWin)
-                  , red         $ statusCard "Avg Loss"       (padL 11 $ fmtUSD avgLoss)
-                  , statusCard              "Profit Factor"   (padL 8  $ fmt2 pf ++ "x")
+            , row [ brightGreen $ statusCard "Avg Win"       (padL 11 $ fmtUSD avgWin)
+                  , red         $ statusCard "Avg Loss"      (padL 11 $ fmtUSD avgLoss)
+                  , statusCard              "Profit Factor"  (padL 8  $ fmt2 pf ++ "x")
                   ]
             , br
-            , row [ red                      $ statusCard "Max Drawdown"   (padL 8  $ fmt2 (tuiMaxDrawdown s) ++ "%")
-                  , statusCard                             "Peak Equity"   (padL 11 $ fmtUSD (tuiPeakEquity s))
-                  , pnlColor unrealized      $ statusCard "Unrealized P&L" (padL 11 $ fmtSigned unrealized)
+            , row [ red                $ statusCard "Max Drawdown"   (padL 8  $ fmt2 (tuiMaxDrawdown s) ++ "%")
+                  , statusCard                      "Peak Equity"    (padL 11 $ fmtUSD (tuiPeakEquity s))
+                  , pnlColor unrealized $ statusCard "Unrealized P&L" (padL 11 $ fmtSigned unrealized)
                   ]
             , br
             , row [ statusCard "Candles Seen" (padL 8  $ show (tuiCandleCount s))
