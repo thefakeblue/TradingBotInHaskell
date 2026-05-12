@@ -14,124 +14,159 @@ module Backtest
 import Data.Time (UTCTime)
 
 data Decision
-    = Buy Double -- if strategy recommends quantity to buy/sell
+    = Buy Double
     | Sell Double
+    | Close        -- exit current position (go flat), no new entry
     | Hold
     deriving (Show, Eq)
 
 decisionToString :: Decision -> String
-decisionToString (Buy _) = "BUY"
+decisionToString (Buy _)  = "BUY"
 decisionToString (Sell _) = "SELL"
-decisionToString Hold = "HOLD"
+decisionToString Close    = "CLOSE"
+decisionToString Hold     = "HOLD"
 
--- must contain info needed to make strategy decision:
 data MarketData = MarketData
-    { timestamp  :: UTCTime, -- UTCTime beccuase of how it gets sent and parse not a double
-     openPrice :: Double,
-     highPrice :: Double,
-     lowPrice :: Double,
-     closePrice :: Double
-     -- currentPrice :: Double, -- can be used for momentum or other indicators, but not needed if strategy only looks at open/high/low/close
-     -- shortMovingAverage :: Double, -- for short term vs long term momentum
-     --longMovingAverage :: Double, -- for short term vs long term momentum
-     -- can add other indicators like rsi, macd, etc
-     --momentum :: Double,
-     --holding :: Bool,
-     --entryPrice :: Double
-     } deriving (Show, Eq)
+    { timestamp  :: UTCTime
+    , openPrice  :: Double
+    , highPrice  :: Double
+    , lowPrice   :: Double
+    , closePrice :: Double
+    } deriving (Show, Eq)
 
-data CandleRow = CandleRow -- each row in cvs is one candle with given market data and expected decision for backtesting
-    {candleData :: MarketData
+data CandleRow = CandleRow
+    { candleData       :: MarketData
     , expectedDecision :: Decision
-    } deriving (Show, Eq) -- each row is [CandleRow] 
+    } deriving (Show, Eq)
 
 candleMomentum :: MarketData -> Double
-candleMomentum marketData = closePrice marketData - openPrice marketData -- deriving momentum rather than storing it as a field
+candleMomentum md = closePrice md - openPrice md
 
 type Strategy = MarketData -> Decision
 
--- if data from C doesnt retrieve momentum, movingaverage etc, need functions
-
 data BacktestState = BacktestState
-    { cash :: Double, -- current cash holding
-      quantityOwned :: Double, -- quantity of asset owned
-      averagePrice :: Double, -- average price of owned asset
-      netProfit :: Double,
-      grossProfit :: Double,
-      grossLoss :: Double,
-      winningTrades :: Int, -- number of winning trades
-      losingTrades :: Int, -- number of losing trades
-      totalTrades :: Int, -- total number of trades executed
-      lastDecision :: Decision -- last signal direction seen by the backtest
-     } deriving (Show, Eq)
+    { cash           :: Double
+    , quantityOwned  :: Double   -- long units
+    , shortQuantity  :: Double   -- short units
+    , averagePrice   :: Double   -- avg entry price for longs
+    , shortAvgPrice  :: Double   -- avg entry price for shorts
+    , netProfit      :: Double
+    , grossProfit    :: Double
+    , grossLoss      :: Double
+    , winningTrades  :: Int
+    , losingTrades   :: Int
+    , totalTrades    :: Int
+    , lastDecision   :: Decision
+    } deriving (Show, Eq)
 
--- initial state for backtesting
 initialBacktestState :: BacktestState
 initialBacktestState = BacktestState
-    { cash = 10000, -- can adjust or make this an input parameter
-      quantityOwned = 0,
-      averagePrice = 0,
-      netProfit = 0,
-      grossProfit = 0,
-      grossLoss = 0,
-      winningTrades = 0,
-      losingTrades = 0,
-      totalTrades = 0,
-      lastDecision = Hold
+    { cash          = 10000
+    , quantityOwned = 0
+    , shortQuantity = 0
+    , averagePrice  = 0
+    , shortAvgPrice = 0
+    , netProfit     = 0
+    , grossProfit   = 0
+    , grossLoss     = 0
+    , winningTrades = 0
+    , losingTrades  = 0
+    , totalTrades   = 0
+    , lastDecision  = Hold
     }
 
--- one step of backtesting: apply strategy to current market data and update state accordingly
+-- Close short helper: closes shortQty units at price, returns updated state
+closeShortAt :: Double -> BacktestState -> BacktestState
+closeShortAt price st
+    | shortQuantity st <= 0 = st
+    | otherwise =
+        let sQty  = shortQuantity st
+            sAvg  = shortAvgPrice st
+            sp    = (sAvg - price) * sQty
+            -- when we entered short we received sAvg*sQty; now we pay price*sQty to close
+            newCash = cash st - price * sQty + sAvg * sQty  -- net cash = cash + P&L
+        in st
+            { shortQuantity = 0
+            , shortAvgPrice = 0
+            , cash          = newCash
+            , netProfit     = netProfit st + sp
+            , grossProfit   = grossProfit st + max sp 0
+            , grossLoss     = grossLoss st + abs (min sp 0)
+            , winningTrades = winningTrades st + if sp > 0 then 1 else 0
+            , losingTrades  = losingTrades  st + if sp < 0 then 1 else 0
+            , totalTrades   = totalTrades   st + 1
+            }
+
+-- Close long helper: closes qty units at price, returns updated state
+closeLongAt :: Double -> BacktestState -> BacktestState
+closeLongAt price st
+    | quantityOwned st <= 0 = st
+    | otherwise =
+        let lQty = quantityOwned st
+            lAvg = averagePrice st
+            lp   = (price - lAvg) * lQty
+            newCash = cash st + price * lQty
+        in st
+            { quantityOwned = 0
+            , averagePrice  = 0
+            , cash          = newCash
+            , netProfit     = netProfit st + lp
+            , grossProfit   = grossProfit st + max lp 0
+            , grossLoss     = grossLoss st + abs (min lp 0)
+            , winningTrades = winningTrades st + if lp > 0 then 1 else 0
+            , losingTrades  = losingTrades  st + if lp < 0 then 1 else 0
+            , totalTrades   = totalTrades   st + 1
+            }
+
 stepBacktest :: Strategy -> BacktestState -> MarketData -> BacktestState
-stepBacktest strategy state marketData = -- strategy, backtest state, and current market data
-    case strategy marketData of -- adjust the state based on strategy decision
+stepBacktest strategy state marketData =
+    let price = closePrice marketData
+    in case strategy marketData of
+
         Buy amount ->
-            if amount <= 0 || cash state < amount * closePrice marketData
-                then state { lastDecision = Buy 0 }
-                else
-                    let oldQuantity = quantityOwned state
-                        newQuantity = oldQuantity + amount
-                        price = closePrice marketData
-                        oldAveragePrice = averagePrice state
-                        newAveragePrice = 
-                            if oldQuantity == 0 
-                            then price 
-                            else ((oldQuantity*oldAveragePrice) + (amount*price)) / newQuantity
-                        newCash = cash state - amount * price
-                    in state
-                        { quantityOwned = newQuantity
-                        , averagePrice = newAveragePrice
-                        , cash = newCash
-                        , lastDecision = Buy 0
-                        }
-        Sell amount ->
-            if amount <= 0 || quantityOwned state <= 0
-            then state { lastDecision = Sell 0 }
+            if amount <= 0 then state { lastDecision = Buy 0 }
             else
-                let closeQty = quantityOwned state
-                    price = closePrice marketData
-                    profitPerUnit = price - averagePrice state
-                    totalProfit = profitPerUnit * closeQty -- close entire long position
-                    newCash = cash state + closeQty * price
-                in state
-                    { quantityOwned = 0
-                    , cash = newCash
-                    , netProfit = netProfit state + totalProfit
-                    , grossProfit = grossProfit state + max totalProfit 0
-                    , grossLoss = grossLoss state + abs (min totalProfit 0)
-                    , winningTrades = winningTrades state + if totalProfit > 0 then 1 else 0
-                    , losingTrades = losingTrades state + if totalProfit < 0 then 1 else 0
-                    , totalTrades = totalTrades state + 1
-                    , averagePrice = 0
-                    , lastDecision = Sell 0
+                -- close any short first, then enter long
+                let st1 = closeShortAt price state
+                in if cash st1 < amount * price
+                   then st1 { lastDecision = Buy 0 }
+                   else
+                       let oldQty = quantityOwned st1
+                           newQty = oldQty + amount
+                           newAvg = if oldQty == 0 then price
+                                    else (oldQty * averagePrice st1 + amount * price) / newQty
+                       in st1
+                           { quantityOwned = newQty
+                           , averagePrice  = newAvg
+                           , cash          = cash st1 - amount * price
+                           , lastDecision  = Buy 0
+                           }
+
+        Sell amount ->
+            if amount <= 0 then state { lastDecision = Sell 0 }
+            else
+                -- close any long first, then enter short
+                let st1     = closeLongAt price state
+                    oldSQty = shortQuantity st1
+                    newSQty = oldSQty + amount
+                    newSAvg = if oldSQty == 0 then price
+                              else (oldSQty * shortAvgPrice st1 + amount * price) / newSQty
+                in st1
+                    { shortQuantity = newSQty
+                    , shortAvgPrice = newSAvg
+                    -- receive short proceeds (short sale model)
+                    , cash          = cash st1 + amount * price
+                    , lastDecision  = Sell 0
                     }
+
+        Close ->
+            -- just exit whatever position is open, go flat
+            let st1 = closeLongAt price state
+                st2 = closeShortAt price st1
+            in st2 { lastDecision = Close }
+
         Hold -> state
 
 runBacktest :: Strategy -> [MarketData] -> BacktestState
 runBacktest strategy history =
     foldl (stepBacktest strategy) initialBacktestState history
-
-
-
--- pass csv through backtesting
--- output print statements
--- gui setup

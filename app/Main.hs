@@ -15,19 +15,19 @@ main :: IO ()
 main = withSocketsDo $ do
     addr <- resolve
     sock <- open addr
-    putStrLn "Server listening on port 5001..." -- 5000 not working for storey
+    putStrLn "Server listening on port 5001..."
 
-    -- open CSV file once
     handle <- openFile "trades.csv" AppendMode
 
-    stateRef <- newIORef initialBacktestState
+    stateRef     <- newIORef initialBacktestState
+    stratStateRef <- newIORef initialRRV2State     -- stateful strategy state
 
     (conn, _) <- accept sock
     putStrLn "Client connected"
-    handleClient conn handle stateRef
+    handleClient conn handle stateRef stratStateRef
 
-handleClient :: Socket -> Handle -> IORef BacktestState -> IO ()
-handleClient conn handle stateRef = do
+handleClient :: Socket -> Handle -> IORef BacktestState -> IORef RRV2State -> IO ()
+handleClient conn handle stateRef stratStateRef = do
     msg <- NBS.recv conn 1024
 
     if BS.null msg
@@ -41,26 +41,29 @@ handleClient conn handle stateRef = do
                     putStrLn "Parse error"
                     NBS.sendAll conn (BS.pack "HOLD\n")
 
-                Just (time, o,h,l,c) -> do 
+                Just (time, o,h,l,c) -> do
                     let marketData = MarketData
-                         { timestamp = time
-                         , openPrice = o
-                         , highPrice = h
-                         , lowPrice = l
+                         { timestamp  = time
+                         , openPrice  = o
+                         , highPrice  = h
+                         , lowPrice   = l
                          , closePrice = c
                          }
-                                    -- ┌─────────────────────────────────────────────────────┐
-                                    -- ┌─────────────────────────────────────────────────────┐
-                                    -- │  BEST LIVE STRATEGY:                               │
-                                    -- │  customRangeReversionStrategy 0.45 0.25           │
-                                    -- │  Validated net profit: 1524.0 on 10-minute history │
-                                    -- │                                                     │
-                                    -- │  Alternative (more conservative):                   │
-                                    -- │  customRangeReversionConservative 0.45 0.25        │
-                                    -- │  (Use below if you want fewer short trades)        │
-                                    -- └─────────────────────────────────────────────────────┘
-                    let decision = customRangeReversionStrategy 0.45 0.25 marketData
-                    -- let decision = customRangeReversionConservative 0.45 0.25 marketData  -- Lower profit on 10-min history
+                                    -- ┌──────────────────────────────────────────────────────────┐
+                                    -- │  LIVE STRATEGY: stepRRV2 V2 (stateful range reversion)  │
+                                    -- │  bodyRatio=0.45  proximity=0.25  ema=0  maxHold=0        │
+                                    -- │  stopLossPct=0.005  (flip if loss <0.5%; close otherwise)│
+                                    -- │                                                          │
+                                    -- │  Backtest: 1min 20117 net / 74% WR                      │
+                                    -- │            10min 3885 net  / 74% WR                     │
+                                    -- │                                                          │
+                                    -- │  Sends BUY / SELL / CLOSE / HOLD to NinjaTrader.        │
+                                    -- │  NinjaTrader handles CLOSE via ExitLong/ExitShort.       │
+                                    -- └──────────────────────────────────────────────────────────┘
+                    oldStratState <- readIORef stratStateRef
+                    let (decision, newStratState) = stepRRV2 0.45 0.25 0 0 0.005 oldStratState marketData
+                    writeIORef stratStateRef newStratState
+
                     let action = decisionToString decision
 
                     oldState <- readIORef stateRef
@@ -69,9 +72,8 @@ handleClient conn handle stateRef = do
 
                     putStrLn ("Sending: " ++ action)
                     putStrLn "Backtest state: "
-                    print newState -- prints updated state
+                    print newState
 
-                        -- WRITE TO CSV, needs to be after action
                     hPutStrLn handle $
                         show time ++ "," ++
                         show o ++ "," ++
@@ -80,15 +82,15 @@ handleClient conn handle stateRef = do
                         show c ++ "," ++
                         action
 
-                    hFlush handle  -- force save immediately
+                    hFlush handle
 
                     NBS.sendAll conn (BS.pack (action ++ "\n"))
-            handleClient conn handle stateRef
+            handleClient conn handle stateRef stratStateRef
 
-parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double) -- parses the Raw Candle data from C and makes it useable in haskell as doubles
+parseCandle :: String -> Maybe (UTCTime, Double, Double, Double, Double)
 parseCandle str =
     case splitComma str of
-        [t,o,h,l,c] -> do -- 't' Date then time,'o' opening (first trades price), 'h' high  (top wick), 'l' Low (bottom wick), 'c' clsoe 'last trade done that candle'
+        [t,o,h,l,c] -> do
             time  <- parseTimeStamp t
             open  <- readMaybe o
             high  <- readMaybe h
@@ -96,7 +98,7 @@ parseCandle str =
             close <- readMaybe c
             return (time , open, high, low, close)
 
-splitComma :: String -> [String]-- takes the new list of items from above and makes them each their own thing
+splitComma :: String -> [String]
 splitComma s =
     case break (== ',') s of
         (a, ',' : rest) -> a : splitComma rest
@@ -108,7 +110,7 @@ resolve = do
             { addrFlags = [AI_PASSIVE]
             , addrSocketType = Stream
             }
-    head <$> getAddrInfo (Just hints) Nothing (Just "5001") -- 5000 wont work on my machine
+    head <$> getAddrInfo (Just hints) Nothing (Just "5001")
 
 open :: AddrInfo -> IO Socket
 open addr = do

@@ -7,77 +7,79 @@ import Data.Time
 
 main :: IO ()
 main = do
-    -- Choose one data file by uncommenting it:
-    let dataFile = "1YearHistoricalData1Min.csv"
-    -- let dataFile = "1YearHistoricalData3Min.csv"
-    -- let dataFile = "1YearHistoricalData5Min.csv"
-    -- dataFile = "1YearHistoricalData10Min.csv"
+    let dataFiles = [ ("1YearHistoricalData1Min.csv",  7000, 64)
+                    , ("1YearHistoricalData10Min.csv", 1500, 64)
+                    ]
 
-    -- Choose one strategy by uncommenting it and commenting the others:
-    -- let strategy = simpleStrategy
-    -- let strategy = momentumStrategy 0.002
-    -- let strategy = meanReversionStrategy 0.002
-    -- let strategy = rangeBreakoutStrategy 0.25
-    -- let strategy = customTrendBreakoutStrategy 0.25 0.002
-    let strategy = customRangeReversionStrategy 0.45 0.25 -- best live strategy on 10-minute data
-    -- let strategy = customRangeReversionConservative 0.45 0.25
-    -- let strategy = stepRSIStrategy 30 70
-    -- let strategy = stepMAStrategy 9 21
-    -- let strategy = stepEMABreakoutStrategy 12
+    -- baseline
+    putStrLn "\n=== BASELINE: customRangeReversionStrategy 0.45 0.25 ==="
+    mapM_ (\(f,tp,tw) -> do
+        contents <- readFile f
+        let mds = mapMaybe parseCsvRow (lines contents)
+        let fs  = runBacktest (customRangeReversionStrategy 0.45 0.25) mds
+        putStrLn $ "\n-- " ++ f ++ " --"
+        printResult "0.45/0.25 baseline" tp tw fs
+      ) dataFiles
 
-    let strategyLabel = "customRangeReversionStrategy 0.45 0.25"
+    -- V2 sweep: bodyRatio, proximity, emaPeriod, maxHold, stopLossPct
+    -- stopLossPct=0   → only flip if profitable (strictest)
+    -- stopLossPct=0.003 → flip if loss <0.3% (recommended)
+    -- stopLossPct=999  → always flip (= original)
+    let sweepParams =
+          [ (0.45, 0.25, 0,  0, 0.003)
+          , (0.45, 0.25, 0,  0, 0.005)
+          , (0.45, 0.25, 0,  0, 0.01 )
+          , (0.45, 0.25, 0,  0, 999.0)
+          , (0.40, 0.25, 0,  0, 0.003)
+          , (0.40, 0.25, 0,  0, 0.005)
+          , (0.40, 0.25, 0,  0, 0.01 )
+          , (0.40, 0.30, 0,  0, 0.003)
+          , (0.40, 0.30, 0,  0, 0.005)
+          , (0.45, 0.30, 0,  0, 0.003)
+          , (0.45, 0.30, 0,  0, 0.005)
+          , (0.45, 0.25, 0, 20, 0.005)
+          ]
 
-    putStrLn $ "Loading data file: " ++ dataFile
-    putStrLn $ "Using strategy: " ++ strategyLabel
+    putStrLn "\n=== customRangeReversionV2 parameter sweep ==="
+    mapM_ (\(f,tp,tw) -> do
+        putStrLn $ "\n-- " ++ f ++ " --"
+        contents <- readFile f
+        let mds = mapMaybe parseCsvRow (lines contents)
+        mapM_ (\(br,pr,ep,mh,sl) -> do
+            let strat = StatefulStrategy initialRRV2State (stepRRV2 br pr ep mh sl)
+            let (fs, _) = runStatefulBacktest strat mds
+            printResult (show br ++ "/prox" ++ show pr ++ "/sl" ++ show sl ++ "/mh" ++ show mh) tp tw fs
+          ) sweepParams
+      ) dataFiles
 
-    contents <- readFile dataFile
-    let rows = lines contents
-    let marketDataList = mapMaybe parseCsvRow rows
-    let finalState = runBacktest strategy marketDataList
+printResult :: String -> Int -> Int -> BacktestState -> IO ()
+printResult label targetNet targetWr st = do
+    let wins  = winningTrades st
+        total = totalTrades st
+        wr    = if total == 0 then 0.0
+                else fromIntegral wins / fromIntegral total * 100 :: Double
+        pf    = if grossLoss st == 0 then 999.0
+                else grossProfit st / grossLoss st
+        netI  = round (netProfit st) :: Int
+        wrI   = round wr :: Int
+        ok    = if netI >= targetNet && wrI >= targetWr then " OK" else " --"
+    putStrLn $ "  [" ++ label ++ "]"
+            ++ "  net=" ++ show netI
+            ++ "  wr="  ++ show wrI ++ "%"
+            ++ "  trades=" ++ show total
+            ++ "  pf=" ++ show (fromIntegral (round (pf * 100) :: Int) / 100.0 :: Double)
+            ++ ok
 
-    let wins   = winningTrades finalState
-    let losses = losingTrades  finalState
-    let total  = totalTrades   finalState
-    let winRate = if total == 0 then 0
-                  else fromIntegral wins / fromIntegral total * 100 :: Double
-    let profitFactor = if grossLoss finalState == 0 then 999
-                       else grossProfit finalState / grossLoss finalState
-    let finalQty = quantityOwned finalState
-    let lastPrice = if null marketDataList then 0 else closePrice (last marketDataList)
-    let finalEquity = cash finalState + finalQty * lastPrice
-
-    putStrLn "────────────────────────────"
-    putStrLn $ "Data file:      " ++ dataFile
-    putStrLn $ "Strategy:       " ++ strategyLabel
-    putStrLn $ "Net profit:     " ++ show (netProfit finalState)
-    putStrLn $ "Gross profit:   " ++ show (grossProfit finalState)
-    putStrLn $ "Gross loss:     " ++ show (grossLoss finalState)
-    putStrLn $ "Profit factor:  " ++ show profitFactor
-    putStrLn $ "Win rate:       " ++ show winRate ++ "%"
-    putStrLn $ "Wins:           " ++ show wins
-    putStrLn $ "Losses:         " ++ show losses
-    putStrLn $ "Total trades:   " ++ show total
-    putStrLn $ "Final cash:     " ++ show (cash finalState)
-    putStrLn $ "Quantity held:  " ++ show finalQty
-    putStrLn $ "Final equity:   " ++ show finalEquity
-    putStrLn "────────────────────────────"
-
-
--- helper
 mapMaybe :: (a -> Maybe b) -> [a] -> [b]
 mapMaybe _ [] = []
-mapMaybe f (x:xs) =
-    case f x of
-        Nothing -> mapMaybe f xs
-        Just y  -> y : mapMaybe f xs
+mapMaybe f (x:xs) = case f x of
+    Nothing -> mapMaybe f xs
+    Just y  -> y : mapMaybe f xs
 
-
--- parse CSV row: open,high,low,close,DECISION
--- We IGNORE the decision and recompute it (so we can test different strategies with same file)
 parseCsvRow :: String -> Maybe MarketData
 parseCsvRow str =
     case splitComma str of
-        [t,o,h,l,c,_] -> do          -- 6 columns, timestamp first
+        [t,o,h,l,c,_] -> do
             time     <- parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S" (take 19 t)
             openVal  <- readMaybe o
             highVal  <- readMaybe h
@@ -92,9 +94,7 @@ parseCsvRow str =
                 }
         _ -> Nothing
 
-
 splitComma :: String -> [String]
-splitComma s =
-    case break (== ',') s of
-        (a, []) -> [a]
-        (a, _:rest) -> a : splitComma rest
+splitComma s = case break (== ',') s of
+    (a, [])     -> [a]
+    (a, _:rest) -> a : splitComma rest

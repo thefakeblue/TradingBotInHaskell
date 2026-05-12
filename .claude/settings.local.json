@@ -3,7 +3,11 @@
     "allow": [
       "Bash(git push *)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(cabal build *)",
+      "Bash(cabal run *)",
+      "Bash(taskkill /f /im HASKELL-TRADER.exe)",
+      "PowerShell(Stop-Process -Name \"HASKELL-TRADER\" -Force -ErrorAction SilentlyContinue)"
     ]
   }
 }

@@ -9,6 +9,11 @@ module Strategies.Custom
     , CustomEMAState(..)
     , initialEMAState
     , stepEMABreakoutStrategy
+    -- V2: stateful range reversion with EMA filter, re-entry, and close-only flips
+    , V2Pos(..)
+    , RRV2State(..)
+    , initialRRV2State
+    , stepRRV2
     ) where
 
 import Backtest
@@ -171,3 +176,114 @@ stepEMABreakoutStrategy period st md
 
 customEmaBreakoutStrategy :: Int -> CustomEMAState -> MarketData -> (Decision, CustomEMAState)
 customEmaBreakoutStrategy = stepEMABreakoutStrategy
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- V2: Stateful range reversion — solves the NinjaTrader "instant flip" problem.
+--
+-- Problems with the original stateless strategy in live trading:
+--   • NinjaTrader's EnterLong/EnterShort automatically closes the opposite side,
+--     so SELL while long = close long AND instantly open short in one candle.
+--   • This causes "switches to sell when it should just do another buy".
+--
+-- How V2 fixes this:
+--   1. Tracks position state (Long / Short / Flat) internally.
+--   2. Opposite-direction signal → sends CLOSE this candle, re-enters opposite
+--      direction NEXT candle.  NinjaTrader sees: CLOSE → (hold 1 candle) → SELL.
+--      No more same-candle flip.
+--   3. Same-direction signal while PROFITABLE → Close (lock in P&L), re-enter
+--      same direction next candle ("repo in the same direction").
+--   4. Same-direction signal while LOSING → HOLD (don't realise the loss,
+--      wait for price to recover or the opposite signal to exit).
+--   5. maxHold > 0: forced time-based exit to prevent runaway losses.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+data V2Pos = V2Flat | V2Long | V2Short deriving (Show, Eq)
+
+data RRV2State = RRV2State
+    { v2Pos       :: V2Pos
+    , v2EntryPx   :: Double
+    , v2HoldCount :: Int
+    , v2Prices    :: [Double]   -- close history for optional EMA
+    } deriving (Show, Eq)
+
+initialRRV2State :: RRV2State
+initialRRV2State = RRV2State V2Flat 0 0 []
+
+-- | Hybrid stateful range-reversion strategy.
+--
+-- Behaviour:
+--   • Small-loss or profitable flip → instant direction change (like original, high performance)
+--   • Deep-loss flip  → CLOSE only (go flat, avoids the "huge loss" double-flip the user reports)
+--   • Same-dir signal → HOLD (let winners run, don't truncate with a repo)
+--   • maxHold > 0     → forced flat exit after N candles
+--   • emaPeriod > 0   → EMA filter for flat entries only
+--
+-- stopLossPct controls the deep-loss threshold:
+--   0.0   = only flip if profitable (strictest)
+--   0.003 = allow flip if loss < 0.3% (recommended for most setups)
+--   999   = always flip instantly (= original behaviour)
+stepRRV2
+    :: Double -> Double -> Int -> Int -> Double
+    -> RRV2State -> MarketData
+    -> (Decision, RRV2State)
+stepRRV2 bodyRatio proximity emaPeriod maxHold stopLossPct st md =
+    let closeP = closePrice md
+        openP  = openPrice  md
+        highP  = highPrice  md
+        lowP   = lowPrice   md
+
+        newPrices = if emaPeriod > 0
+                    then take (emaPeriod + 60) (closeP : v2Prices st)
+                    else []
+        ema       = if emaPeriod > 0 then calcEMA emaPeriod newPrices else Nothing
+        st1       = st { v2Prices = newPrices }
+
+        emaOkBuy  = case ema of { Nothing -> True; Just e -> closeP <= e }
+        emaOkSell = case ema of { Nothing -> True; Just e -> closeP >= e }
+
+        range      = highP - lowP
+        body       = abs (closeP - openP)
+        bodyR      = if range == 0 then 0 else body / range
+        posInRange = if range == 0 then 0.5 else (closeP - lowP) / range
+
+        rawBuy  = closeP < openP && bodyR >= bodyRatio && posInRange <= proximity
+        rawSell = closeP > openP && bodyR >= bodyRatio && posInRange >= (1 - proximity)
+
+        entryPx  = v2EntryPx st1
+        hc       = v2HoldCount st1
+        maxHit   = maxHold > 0 && hc >= maxHold
+
+        goLong  = (Buy  1, st1 { v2Pos = V2Long,  v2EntryPx = closeP, v2HoldCount = 0 })
+        goShort = (Sell 1, st1 { v2Pos = V2Short, v2EntryPx = closeP, v2HoldCount = 0 })
+        goFlat  = (Close,  st1 { v2Pos = V2Flat,  v2HoldCount = 0 })
+        stay    = (Hold,   st1 { v2HoldCount = hc + 1 })
+
+        addLong  = (Buy  1, st1 { v2HoldCount = 0 })
+        addShort = (Sell 1, st1 { v2HoldCount = 0 })
+
+    in case v2Pos st1 of
+
+        V2Flat ->
+            if      rawBuy  && emaOkBuy  then goLong
+            else if rawSell && emaOkSell then goShort
+            else                              (Hold, st1)
+
+        V2Long ->
+            -- flip is allowed if loss is within stopLossPct; only CLOSE on deep losses
+            let allowFlip = closeP >= entryPx * (1 - stopLossPct)
+            in
+            if      rawSell && allowFlip  then goShort  -- within tolerance: instant flip
+            else if rawSell               then goFlat   -- deep loss: CLOSE only, no short
+            else if maxHit                then goFlat
+            else if rawBuy                then addLong  -- same-dir: accumulate like baseline
+
+            else                               stay
+
+        V2Short ->
+            let allowFlip = closeP <= entryPx * (1 + stopLossPct)
+            in
+            if      rawBuy && allowFlip   then goLong   -- within tolerance: instant flip
+            else if rawBuy                then goFlat   -- deep loss: CLOSE only
+            else if maxHit                then goFlat
+            else if rawSell               then addShort -- same-dir: accumulate like baseline
+            else                               stay
