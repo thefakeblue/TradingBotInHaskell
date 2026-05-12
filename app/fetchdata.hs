@@ -23,10 +23,10 @@ main = withSocketsDo $ do
     putStrLn "Server listening on port 5001..." -- 5000 not working for storey
 
 
-    existingTimes <- loadExistingTimestamps "HistoricalData1Min.csv"
+    existingTimes <- loadExistingTimestamps "HistoricalData1MinPAST20Days.csv"
 
     -- open CSV file once
-    handle <- openFile "1YearHistoricalData10Min.csv" AppendMode
+    handle <- openFile "HistoricalData1MinPAST20Days.csv" AppendMode
 
     stateRef <- newIORef initialBacktestState -- added by storey
 

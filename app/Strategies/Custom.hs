@@ -14,6 +14,14 @@ module Strategies.Custom
     , RRV2State(..)
     , initialRRV2State
     , stepRRV2
+    -- TARR: Trend-Aware Range Reversion (dual-EMA regime filter)
+    , TARRState(..)
+    , initialTARRState
+    , stepTARR
+    -- SNAP: Scalp with No Alternation Protocol
+    , SNAPState(..)
+    , initialSNAPState
+    , stepSNAP
     ) where
 
 import Backtest
@@ -258,9 +266,6 @@ stepRRV2 bodyRatio proximity emaPeriod maxHold stopLossPct st md =
         goFlat  = (Close,  st1 { v2Pos = V2Flat,  v2HoldCount = 0 })
         stay    = (Hold,   st1 { v2HoldCount = hc + 1 })
 
-        addLong  = (Buy  1, st1 { v2HoldCount = 0 })
-        addShort = (Sell 1, st1 { v2HoldCount = 0 })
-
     in case v2Pos st1 of
 
         V2Flat ->
@@ -275,9 +280,7 @@ stepRRV2 bodyRatio proximity emaPeriod maxHold stopLossPct st md =
             if      rawSell && allowFlip  then goShort  -- within tolerance: instant flip
             else if rawSell               then goFlat   -- deep loss: CLOSE only, no short
             else if maxHit                then goFlat
-            else if rawBuy                then addLong  -- same-dir: accumulate like baseline
-
-            else                               stay
+            else                               stay     -- same-dir or neutral: hold position
 
         V2Short ->
             let allowFlip = closeP <= entryPx * (1 + stopLossPct)
@@ -285,5 +288,269 @@ stepRRV2 bodyRatio proximity emaPeriod maxHold stopLossPct st md =
             if      rawBuy && allowFlip   then goLong   -- within tolerance: instant flip
             else if rawBuy                then goFlat   -- deep loss: CLOSE only
             else if maxHit                then goFlat
-            else if rawSell               then addShort -- same-dir: accumulate like baseline
+            else                               stay     -- same-dir or neutral: hold position
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- TARR V1: Trend-Aware Range Reversion
+--
+-- Problem with pure range reversion (RRV2): it shorts every bullish extreme and
+-- buys every bearish extreme.  In a strong trend it bleeds: it fades each new
+-- high/low, gets stopped out, repeats — death by a thousand small losses.
+--
+-- Fix: dual-EMA regime filter.
+--   fast EMA > slow EMA  (uptrend)   → only long (buy-pullback) entries
+--   fast EMA < slow EMA  (downtrend) → only short (sell-rally) entries
+--   EMAs nearly equal    (neutral)   → full two-way reversion as before
+--
+-- trendThresh controls sensitivity: min |fastEMA - slowEMA| / price to call a
+-- trend.  0.0002 ≈ 1.5 pts at 7400 — catches sustained directional moves while
+-- ignoring one-bar noise.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+data TARRState = TARRState
+    { tarrPos      :: V2Pos
+    , tarrEntryPx  :: Double
+    , tarrHoldCount :: Int
+    , tarrPrices   :: [Double]   -- recent closes (newest first)
+    , tarrShortCd  :: Int        -- cooldown: bars before re-entering short after adverse exit
+    , tarrLongCd   :: Int        -- cooldown: bars before re-entering long after adverse exit
+    } deriving (Show, Eq)
+
+initialTARRState :: TARRState
+initialTARRState = TARRState V2Flat 0 0 [] 0 0
+
+stepTARR
+    :: Double  -- bodyRatio    e.g. 0.45
+    -> Double  -- proximity    e.g. 0.25
+    -> Int     -- fast EMA period  e.g. 10
+    -> Int     -- slow EMA period  e.g. 25
+    -> Int     -- maxHold  (0 = disabled; skipped when trend is with position)
+    -> Double  -- stopLossPct  flip tolerance: 0 = flip only at profit, 0.005 = allow flips within 0.5% loss
+    -> Double  -- trendThresh  min (fastEMA-slowEMA)/price to call a trend e.g. 0.0005
+    -> Double  -- hardStopPct  price-based stop-loss e.g. 0.001  (0 = off)
+    -> Int     -- adverseCooldown  bars to block same-dir re-entry after hard-stop/trend exit (0 = off)
+    -> Double  -- takeProfitPct  lock-in gains when price moves this far in our favour (0 = off)
+    -> TARRState -> MarketData
+    -> (Decision, TARRState)
+stepTARR bodyRatio proximity fastP slowP maxHold stopLossPct trendThresh hardStopPct cooldown takeProfitPct st md =
+    let closeP = closePrice md
+        openP  = openPrice  md
+        highP  = highPrice  md
+        lowP   = lowPrice   md
+
+        newPrices = take (slowP + 60) (closeP : tarrPrices st)
+        fastEMA   = calcEMA fastP newPrices
+        slowEMA   = calcEMA slowP newPrices
+
+        shortCd = max 0 (tarrShortCd st - 1)
+        longCd  = max 0 (tarrLongCd  st - 1)
+
+        st1 = st { tarrPrices = newPrices, tarrShortCd = shortCd, tarrLongCd = longCd }
+
+        trendDir = case (fastEMA, slowEMA) of
+            (Just fe, Just se)
+                | (fe - se) / closeP >  trendThresh -> ( 1 :: Int)
+                | (fe - se) / closeP < -trendThresh -> (-1 :: Int)
+                | otherwise                          ->  0
+            _ -> 0
+
+        range      = highP - lowP
+        body       = abs (closeP - openP)
+        bodyR      = if range == 0 then 0 else body / range
+        posInRange = if range == 0 then 0.5 else (closeP - lowP) / range
+
+        rawBuy  = closeP < openP && bodyR >= bodyRatio && posInRange <= proximity
+        rawSell = closeP > openP && bodyR >= bodyRatio && posInRange >= (1 - proximity)
+
+        filtBuy  = rawBuy  && trendDir >= 0 && longCd  == 0
+        filtSell = rawSell && trendDir <= 0 && shortCd == 0
+
+        entryPx = tarrEntryPx st1
+        hc      = tarrHoldCount st1
+
+        longHardStop   = hardStopPct   > 0 && entryPx > 0 && closeP <= entryPx * (1 - hardStopPct)
+        shortHardStop  = hardStopPct   > 0 && entryPx > 0 && closeP >= entryPx * (1 + hardStopPct)
+        longTakeProfit = takeProfitPct > 0 && entryPx > 0 && closeP >= entryPx * (1 + takeProfitPct)
+        shortTakeProfit= takeProfitPct > 0 && entryPx > 0 && closeP <= entryPx * (1 - takeProfitPct)
+
+        goLong  = (Buy  1, st1 { tarrPos = V2Long,  tarrEntryPx = closeP, tarrHoldCount = 0 })
+        goShort = (Sell 1, st1 { tarrPos = V2Short, tarrEntryPx = closeP, tarrHoldCount = 0 })
+        goFlat  = (Close,  st1 { tarrPos = V2Flat,  tarrHoldCount = 0 })
+        goCoolShort = (Close, st1 { tarrPos = V2Flat, tarrHoldCount = 0, tarrShortCd = cooldown })
+        goCoolLong  = (Close, st1 { tarrPos = V2Flat, tarrHoldCount = 0, tarrLongCd  = cooldown })
+        stay    = (Hold,   st1 { tarrHoldCount = hc + 1 })
+
+    in case tarrPos st1 of
+
+        V2Flat ->
+            if      filtBuy  then goLong
+            else if filtSell then goShort
+            else                  (Hold, st1)
+
+        V2Long ->
+            let allowFlip   = closeP >= entryPx * (1 - stopLossPct)
+                trendWithUs = trendDir > 0
+                maxHit      = maxHold > 0 && hc >= maxHold && not trendWithUs
+            in
+            if      longHardStop          then goCoolLong
+            else if longTakeProfit        then goFlat
+            else if filtSell && allowFlip then goShort
+            else if filtSell              then goFlat
+            else if maxHit                then goFlat
             else                               stay
+
+        V2Short ->
+            let allowFlip    = closeP <= entryPx * (1 + stopLossPct)
+                trendAgainst = trendDir > 0
+                maxHit       = maxHold > 0 && hc >= maxHold
+            in
+            if      shortHardStop         then goCoolShort
+            else if shortTakeProfit       then goFlat
+            else if trendAgainst          then goCoolShort
+            else if filtBuy && allowFlip  then goLong
+            else if filtBuy               then goFlat
+            else if maxHit                then goFlat
+            else                               stay
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- SNAP: Scalp with No Alternation Protocol
+--
+-- Problems with TARR:
+--   • Flips directly long→short on the same candle when a reversal fires.
+--   • In a rising market with neutral EMA gap, it keeps alternating directions.
+--   • User wants Long→Long when trend is up, not Long→Short→Long.
+--
+-- How SNAP fixes this:
+--   1. NO in-position flips.  To go the other direction the strategy must first
+--      go FLAT, then a fresh entry fires.  Long → flat → flat/long (never L→S).
+--   2. Explicit take-profit.  Exits winning positions quickly rather than
+--      waiting for a reversal signal.  Fewer "win turns into loss" trades →
+--      higher win rate.
+--   3. EMA trend filter blocks entries against the trend (same as TARR).
+--   4. Cooldown after hard-stop or trend-against exit blocks same-dir re-entry.
+--
+-- Expected behaviour:
+--   • Oscillating market: rapid open/close cycles capturing small moves → high
+--     trade count with good win rate.
+--   • Trending up: shorts filtered out (trendDir=1), longs take-profit and
+--     re-enter on each pullback candle → consecutive longs, no shorts.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+data SNAPState = SNAPState
+    { snapPos     :: V2Pos
+    , snapEntry   :: Double
+    , snapHolds   :: Int
+    , snapPrices  :: [Double]
+    , snapShortCd :: Int
+    , snapLongCd  :: Int
+    } deriving (Show, Eq)
+
+initialSNAPState :: SNAPState
+initialSNAPState = SNAPState V2Flat 0 0 [] 0 0
+
+stepSNAP
+    :: Double  -- bodyRatio       e.g. 0.45
+    -> Double  -- proximity       e.g. 0.25
+    -> Int     -- fast EMA period e.g. 10
+    -> Int     -- slow EMA period e.g. 25
+    -> Int     -- maxHold  candles before forced exit (0 = off)
+    -> Double  -- trendThresh     e.g. 0.0005
+    -> Double  -- hardStopPct     e.g. 0.001  (~7.4 pts at 7400)
+    -> Double  -- takeProfitPct   e.g. 0.0005 (~3.7 pts)  (0 = off)
+    -> Int     -- cooldown        bars to block re-entry after hard-stop / trend exit
+    -> Bool    -- profitFlip: when True, a reversal signal while AT PROFIT flips direction
+               --   instead of going flat.  False = pure SNAP (always go flat first).
+    -> SNAPState -> MarketData
+    -> (Decision, SNAPState)
+stepSNAP bodyRatio proximity fastP slowP maxHold trendThresh hardStopPct takeProfitPct cooldown profitFlip st md =
+    let closeP = closePrice md
+        openP  = openPrice  md
+        highP  = highPrice  md
+        lowP   = lowPrice   md
+
+        newPrices = take (slowP + 60) (closeP : snapPrices st)
+        fastEMA   = calcEMA fastP newPrices
+        slowEMA   = calcEMA slowP newPrices
+
+        shortCd   = max 0 (snapShortCd st - 1)
+        longCd    = max 0 (snapLongCd  st - 1)
+        st1       = st { snapPrices = newPrices, snapShortCd = shortCd, snapLongCd = longCd }
+
+        trendDir  = case (fastEMA, slowEMA) of
+            (Just fe, Just se)
+                | (fe - se) / closeP >  trendThresh -> ( 1 :: Int)
+                | (fe - se) / closeP < -trendThresh -> (-1 :: Int)
+                | otherwise                          ->  0
+            _ -> 0
+
+        range      = highP - lowP
+        body       = abs (closeP - openP)
+        bodyR      = if range == 0 then 0 else body / range
+        posInRange = if range == 0 then 0.5 else (closeP - lowP) / range
+
+        rawBuy  = closeP < openP && bodyR >= bodyRatio && posInRange <= proximity
+        rawSell = closeP > openP && bodyR >= bodyRatio && posInRange >= (1 - proximity)
+
+        filtBuy  = rawBuy  && trendDir >= 0 && longCd  == 0
+        filtSell = rawSell && trendDir <= 0 && shortCd == 0
+
+        entryPx = snapEntry st1
+        hc      = snapHolds st1
+        maxHit  = maxHold > 0 && hc >= maxHold
+
+        longHardStop   = hardStopPct   > 0 && entryPx > 0 && closeP <= entryPx * (1 - hardStopPct)
+        longTakeProfit = takeProfitPct > 0 && entryPx > 0 && closeP >= entryPx * (1 + takeProfitPct)
+
+        shortHardStop   = hardStopPct   > 0 && entryPx > 0 && closeP >= entryPx * (1 + hardStopPct)
+        shortTakeProfit = takeProfitPct > 0 && entryPx > 0 && closeP <= entryPx * (1 - takeProfitPct)
+
+        goLong      = (Buy  1, st1 { snapPos = V2Long,  snapEntry = closeP, snapHolds = 0 })
+        goShort     = (Sell 1, st1 { snapPos = V2Short, snapEntry = closeP, snapHolds = 0 })
+        goFlat      = (Close,  st1 { snapPos = V2Flat,  snapHolds = 0 })
+        goCoolShort = (Close,  st1 { snapPos = V2Flat,  snapHolds = 0, snapShortCd = cooldown })
+        goCoolLong  = (Close,  st1 { snapPos = V2Flat,  snapHolds = 0, snapLongCd  = cooldown })
+        stay        = (Hold,   st1 { snapHolds = hc + 1 })
+
+    in case snapPos st1 of
+
+        V2Flat ->
+            if      filtBuy  then goLong
+            else if filtSell then goShort
+            else                  (Hold, st1)
+
+        V2Long ->
+            -- halfStop = entryPx * (1 - takeProfitPct):
+            --   tp <  hs  →  signal exits small losses AND profits (hybrid)
+            --   tp >= hs  →  hard stop fires before halfStop; signal exits only at profit
+            -- profitFlip: when True, a sell signal at profit flips to Short instead of going Flat.
+            --   False (default SNAP) = always go Flat, never flip in-position.
+            let trendWithUs   = trendDir > 0
+                timeExit      = maxHit && not trendWithUs
+                trendExit     = trendDir < 0
+                halfStop      = entryPx * (1 - takeProfitPct)
+                atProfit      = closeP >= entryPx
+                signalExit    = filtSell && (atProfit || closeP <= halfStop)
+            in
+            if      longHardStop                       then goCoolLong
+            else if longTakeProfit                     then goFlat
+            else if trendExit                          then goCoolLong
+            else if profitFlip && filtSell && atProfit then goShort
+            else if signalExit                         then goFlat
+            else if timeExit                           then goFlat
+            else                                            stay
+
+        V2Short ->
+            let trendWithUs   = trendDir < 0
+                timeExit      = maxHit && not trendWithUs
+                trendExit     = trendDir > 0
+                halfStop      = entryPx * (1 + takeProfitPct)
+                atProfit      = closeP <= entryPx
+                signalExit    = filtBuy && (atProfit || closeP >= halfStop)
+            in
+            if      shortHardStop                      then goCoolShort
+            else if shortTakeProfit                    then goFlat
+            else if trendExit                          then goCoolShort
+            else if profitFlip && filtBuy && atProfit  then goLong
+            else if signalExit                         then goFlat
+            else if timeExit                           then goFlat
+            else                                            stay

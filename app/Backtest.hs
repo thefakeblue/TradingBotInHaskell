@@ -83,8 +83,8 @@ closeShortAt price st
         let sQty  = shortQuantity st
             sAvg  = shortAvgPrice st
             sp    = (sAvg - price) * sQty
-            -- when we entered short we received sAvg*sQty; now we pay price*sQty to close
-            newCash = cash st - price * sQty + sAvg * sQty  -- net cash = cash + P&L
+            -- cash already includes entry proceeds (added when shorting); just pay close price
+            newCash = cash st - price * sQty
         in st
             { shortQuantity = 0
             , shortAvgPrice = 0
@@ -126,38 +126,34 @@ stepBacktest strategy state marketData =
         Buy amount ->
             if amount <= 0 then state { lastDecision = Buy 0 }
             else
-                -- close any short first, then enter long
+                -- close any short first, then enter long (one position at a time)
                 let st1 = closeShortAt price state
-                in if cash st1 < amount * price
+                in if quantityOwned st1 > 0
+                   -- already long: ignore the signal, stay in current position
                    then st1 { lastDecision = Buy 0 }
-                   else
-                       let oldQty = quantityOwned st1
-                           newQty = oldQty + amount
-                           newAvg = if oldQty == 0 then price
-                                    else (oldQty * averagePrice st1 + amount * price) / newQty
-                       in st1
-                           { quantityOwned = newQty
-                           , averagePrice  = newAvg
-                           , cash          = cash st1 - amount * price
-                           , lastDecision  = Buy 0
-                           }
+                   else if cash st1 < amount * price
+                   then st1 { lastDecision = Buy 0 }
+                   else st1
+                       { quantityOwned = amount
+                       , averagePrice  = price
+                       , cash          = cash st1 - amount * price
+                       , lastDecision  = Buy 0
+                       }
 
         Sell amount ->
             if amount <= 0 then state { lastDecision = Sell 0 }
             else
-                -- close any long first, then enter short
-                let st1     = closeLongAt price state
-                    oldSQty = shortQuantity st1
-                    newSQty = oldSQty + amount
-                    newSAvg = if oldSQty == 0 then price
-                              else (oldSQty * shortAvgPrice st1 + amount * price) / newSQty
-                in st1
-                    { shortQuantity = newSQty
-                    , shortAvgPrice = newSAvg
-                    -- receive short proceeds (short sale model)
-                    , cash          = cash st1 + amount * price
-                    , lastDecision  = Sell 0
-                    }
+                -- close any long first, then enter short (one position at a time)
+                let st1 = closeLongAt price state
+                in if shortQuantity st1 > 0
+                   -- already short: ignore the signal, stay in current position
+                   then st1 { lastDecision = Sell 0 }
+                   else st1
+                       { shortQuantity = amount
+                       , shortAvgPrice = price
+                       , cash          = cash st1 + amount * price
+                       , lastDecision  = Sell 0
+                       }
 
         Close ->
             -- just exit whatever position is open, go flat

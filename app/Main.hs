@@ -20,13 +20,13 @@ main = withSocketsDo $ do
     handle <- openFile "trades.csv" AppendMode
 
     stateRef     <- newIORef initialBacktestState
-    stratStateRef <- newIORef initialRRV2State     -- stateful strategy state
+    stratStateRef <- newIORef initialSNAPState     -- stateful strategy state
 
     (conn, _) <- accept sock
     putStrLn "Client connected"
     handleClient conn handle stateRef stratStateRef
 
-handleClient :: Socket -> Handle -> IORef BacktestState -> IORef RRV2State -> IO ()
+handleClient :: Socket -> Handle -> IORef BacktestState -> IORef SNAPState -> IO ()
 handleClient conn handle stateRef stratStateRef = do
     msg <- NBS.recv conn 1024
 
@@ -49,19 +49,15 @@ handleClient conn handle stateRef stratStateRef = do
                          , lowPrice   = l
                          , closePrice = c
                          }
-                                    -- ┌──────────────────────────────────────────────────────────┐
-                                    -- │  LIVE STRATEGY: stepRRV2 V2 (stateful range reversion)  │
-                                    -- │  bodyRatio=0.45  proximity=0.25  ema=0  maxHold=0        │
-                                    -- │  stopLossPct=0.005  (flip if loss <0.5%; close otherwise)│
-                                    -- │                                                          │
-                                    -- │  Backtest: 1min 20117 net / 74% WR                      │
-                                    -- │            10min 3885 net  / 74% WR                     │
-                                    -- │                                                          │
-                                    -- │  Sends BUY / SELL / CLOSE / HOLD to NinjaTrader.        │
-                                    -- │  NinjaTrader handles CLOSE via ExitLong/ExitShort.       │
-                                    -- └──────────────────────────────────────────────────────────┘
+                                    -- LIVE STRATEGY: SNAP+ (Scalp with No Alternation Protocol + profit flip)
+                                    -- br=0.45 pr=0.25 fast=3 slow=8 mh=20 tt=0.0005 hs=0.001 tp=0.001 cd=5
+                                    -- profitFlip=True: flip L→S only when closing trade is at profit
+                                    -- hardStop=0.001 (~7 pts) exits before a bad position bleeds
+                                    -- tp=0.001: lock in gains at ~7 pts above entry
+                                    -- cd=5: 5-bar cooldown after hard-stop or trend-against exit
+                                    -- Backtest: 20d net=656 wr=74%, 1yr net=6753 wr=72%
                     oldStratState <- readIORef stratStateRef
-                    let (decision, newStratState) = stepRRV2 0.45 0.25 0 0 0.005 oldStratState marketData
+                    let (decision, newStratState) = stepSNAP 0.45 0.25 3 8 20 0.0005 0.001 0.001 5 True oldStratState marketData
                     writeIORef stratStateRef newStratState
 
                     let action = decisionToString decision
