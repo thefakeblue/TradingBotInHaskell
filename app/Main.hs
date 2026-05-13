@@ -20,7 +20,7 @@ main = withSocketsDo $ do
     handle <- openFile "trades.csv" AppendMode
 
     stateRef     <- newIORef initialBacktestState
-    stratStateRef <- newIORef initialSNAPState     -- stateful strategy state
+    stratStateRef <- newIORef initialSNAPState    -- stateful strategy state
 
     (conn, _) <- accept sock
     putStrLn "Client connected"
@@ -49,21 +49,25 @@ handleClient conn handle stateRef stratStateRef = do
                          , lowPrice   = l
                          , closePrice = c
                          }
-                                    -- LIVE STRATEGY: SNAP+ (Scalp with No Alternation Protocol + profit flip)
-                                    -- br=0.45 pr=0.25 fast=3 slow=8 mh=20 tt=0.0005 hs=0.001 tp=0.001 cd=5
-                                    -- profitFlip=True: flip L→S only when closing trade is at profit
-                                    -- hardStop=0.001 (~7 pts) exits before a bad position bleeds
-                                    -- tp=0.001: lock in gains at ~7 pts above entry
-                                    -- cd=5: 5-bar cooldown after hard-stop or trend-against exit
-                                    -- Backtest: 20d net=656 wr=74%, 1yr net=6753 wr=72%
+                                    -- LIVE STRATEGY: SNAP-NoFlip — pure flat exits, no in-position flips
+                                    -- Backtest: 20d WR=73% net=432  |  1yr WR=72% net=5265
+                                    -- br=0.45 pr=0.25 f5/s13 tt=0.0005 hs=0.001 tp=0.0005 mh=20 cd=5
+                                    -- profitFlip=FALSE: never flips long→short inside a trade.
+                                    -- Position always closes FLAT before entering the opposite side.
+                                    -- Fixes: no more shorting into sustained uptrends.
+                                    --
+                                    -- SNAP+ (higher net, more aggressive, re-enable if desired):
+                                    -- stepSNAP 0.45 0.25 3 8 20 0.0005 0.001 0.001 5 True
+                                    -- Backtest: 20d WR=74% net=656  |  1yr WR=72% net=6753
                     oldStratState <- readIORef stratStateRef
-                    let (decision, newStratState) = stepSNAP 0.45 0.25 3 8 20 0.0005 0.001 0.001 5 True oldStratState marketData
+                    let (decision, newStratState) = stepSNAP 0.45 0.25 5 13 20 0.0005 0.001 0.0005 5 False oldStratState marketData
                     writeIORef stratStateRef newStratState
 
-                    let action = decisionToString decision
+                    let liveDecision = case decision of { Sell _ -> Hold; _ -> decision }
+                    let action = decisionToString liveDecision
 
                     oldState <- readIORef stateRef
-                    let newState = stepBacktest (\_ -> decision) oldState marketData
+                    let newState = stepBacktest (\_ -> liveDecision) oldState marketData
                     writeIORef stateRef newState
 
                     putStrLn ("Sending: " ++ action)

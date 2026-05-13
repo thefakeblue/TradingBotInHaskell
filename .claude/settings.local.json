@@ -9,7 +9,13 @@
       "Bash(taskkill /f /im HASKELL-TRADER.exe)",
       "PowerShell(Stop-Process -Name \"HASKELL-TRADER\" -Force -ErrorAction SilentlyContinue)",
       "Bash(grep -v \"^$\")",
-      "Bash(powershell -command \"\\(Get-Content HistoricalData1MinPAST20Days.csv | Measure-Object -Line\\).Lines\")"
+      "Bash(powershell -command \"\\(Get-Content HistoricalData1MinPAST20Days.csv | Measure-Object -Line\\).Lines\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\adamh\\\\VScode\\\\TRADER_BOT\\\\HASKELL_TRADER\\\\TradingBotInHaskell\" -Recurse -Directory)",
+      "Bash(Select-Object FullName)",
+      "PowerShell(ls -Recurse \"c:\\\\Users\\\\adamh\\\\VScode\\\\TRADER_BOT\\\\HASKELL_TRADER\\\\TradingBotInHaskell\" -File | Where-Object { $_.Name -match '\\\\.\\(hs|cabal\\)$' } | Select-Object FullName)",
+      "Bash(grep -E \"\\(error|warning.*unused|Linking|^$\\)\")",
+      "Bash(stack build *)",
+      "Bash(Select-String -Pattern \"\\(PRIMO|net=|OK\\)\")"
     ]
   }
 }

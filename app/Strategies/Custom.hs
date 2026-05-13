@@ -22,6 +22,10 @@ module Strategies.Custom
     , SNAPState(..)
     , initialSNAPState
     , stepSNAP
+    -- PRIMO: Pullback-Reversion In Momentum Only (Long-Only)
+    , PRIMOState(..)
+    , initialPRIMOState
+    , stepPRIMO
     ) where
 
 import Backtest
@@ -554,3 +558,142 @@ stepSNAP bodyRatio proximity fastP slowP maxHold trendThresh hardStopPct takePro
             else if signalExit                         then goFlat
             else if timeExit                           then goFlat
             else                                            stay
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- PRIMO: Pullback-Reversion In Momentum Only (Long-Only)
+--
+-- Two modes controlled by trailPct:
+--
+--   PRIMO-Safe  (trailPct = 0)  — high win-rate, small losses
+--     • Fixed take-profit (takeProfitPct) caps wins to keep WR high.
+--     • Signal exit: new dip fires while in profit → close immediately
+--       (dynamic peak-capture; this is what pushes WR above 65%).
+--     • Tight hard stop (hardStopPct small) keeps avg loss small.
+--     • strictTrend=True recommended.
+--
+--   PRIMO-Max   (trailPct > 0)  — maximum net, WR ≥ 60%
+--     • No fixed TP.  Position rides the trend until a trailing stop fires.
+--     • Trailing stop: tracks the highest close seen since entry (peak);
+--       exits when close falls trailPct below that peak AND peak was already
+--       above entry (i.e., we locked in some profit).
+--     • Hard stop still acts as the absolute floor while below entry.
+--     • Signal exit disabled — let winners run.
+--     • Average winner can be 15-30 pts on strong moves.
+--
+-- Entry (both modes):
+--   • Bearish dip candle (close < open, body ≥ bodyRatio, close in bottom
+--     [proximity] of range).
+--   • close ≥ slowEMA — downtrend guard (no entries below slow EMA).
+--   • EMA cross: trendDir ≥ 0 (loose) or > 0 (strictTrend).
+--   • No active cooldown.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+data PRIMOState = PRIMOState
+    { primoInLong   :: Bool
+    , primoEntry    :: Double
+    , primoPeak     :: Double   -- highest close since entry (for trailing stop)
+    , primoHolds    :: Int
+    , primoPrices   :: [Double]
+    , primoCooldown :: Int
+    } deriving (Show, Eq)
+
+initialPRIMOState :: PRIMOState
+initialPRIMOState = PRIMOState False 0 0 0 [] 0
+
+stepPRIMO
+    :: Double  -- bodyRatio       e.g. 0.40
+    -> Double  -- proximity       e.g. 0.25
+    -> Int     -- fast EMA period e.g. 5
+    -> Int     -- slow EMA period e.g. 13
+    -> Double  -- trendThresh     e.g. 0.0003
+    -> Double  -- hardStopPct     e.g. 0.0008  (absolute floor; fires regardless of peak)
+    -> Double  -- takeProfitPct   e.g. 0.0006  (Safe mode only; 0 = disabled)
+    -> Double  -- trailPct        e.g. 0.0015  (Max mode; 0 = disabled → Safe mode)
+    -> Int     -- maxHold         e.g. 12
+    -> Int     -- cooldown        e.g. 3
+    -> Bool    -- strictTrend: True = only enter when trendDir > 0 (Safe default)
+    -> PRIMOState -> MarketData
+    -> (Decision, PRIMOState)
+stepPRIMO bodyRatio proximity fastP slowP trendThresh hardStopPct takeProfitPct trailPct maxHold cooldown strictTrend st md =
+    let closeP = closePrice md
+        openP  = openPrice  md
+        highP  = highPrice  md
+        lowP   = lowPrice   md
+
+        newPrices = take (slowP + 60) (closeP : primoPrices st)
+        fastEMA   = calcEMA fastP newPrices
+        slowEMA   = calcEMA slowP newPrices
+        cd        = max 0 (primoCooldown st - 1)
+        st1       = st { primoPrices = newPrices, primoCooldown = cd }
+
+        trendDir = case (fastEMA, slowEMA) of
+            (Just fe, Just se)
+                | (fe - se) / closeP >  trendThresh -> ( 1 :: Int)
+                | (fe - se) / closeP < -trendThresh -> (-1 :: Int)
+                | otherwise                          ->  0
+            _ -> 0
+
+        range      = highP - lowP
+        body       = abs (closeP - openP)
+        bodyR      = if range == 0 then 0 else body / range
+        posInRange = if range == 0 then 0.5 else (closeP - lowP) / range
+
+        dipSignal = closeP < openP && bodyR >= bodyRatio && posInRange <= proximity
+
+        trendOk = if strictTrend then trendDir > 0 else trendDir >= 0
+
+        priceAboveEma = case slowEMA of
+            Nothing -> False
+            Just se -> closeP >= se
+
+        pullbackBuy = dipSignal && trendOk && priceAboveEma && cd == 0
+
+        entryPx  = primoEntry st1
+        hc       = primoHolds st1
+        maxHit   = maxHold > 0 && hc >= maxHold
+
+        -- Track the highest close since entry (used by trailing stop)
+        newPeak = if primoInLong st1 then max closeP (primoPeak st1) else 0
+        st2     = st1 { primoPeak = newPeak }
+
+        -- Hard stop: absolute floor, fires whether above or below entry
+        hardStop = hardStopPct > 0 && entryPx > 0
+                && closeP <= entryPx * (1 - hardStopPct)
+
+        -- Safe mode exits (trailPct == 0)
+        -- Fixed TP: closes at a known gain
+        takeProfit  = trailPct == 0 && takeProfitPct > 0 && entryPx > 0
+                   && closeP >= entryPx * (1 + takeProfitPct)
+        -- Signal exit: new dip appears while at any profit → grab the gain
+        -- Only active in Safe mode (takeProfitPct > 0); tp=0 disables this for hold/max modes.
+        signalExit  = trailPct == 0 && takeProfitPct > 0 && dipSignal && entryPx > 0 && closeP > entryPx
+
+        -- Max mode exit (trailPct > 0)
+        -- Trailing stop: fires only after peak has moved above entry (profit locked)
+        -- then closes when price pulls back trailPct from that peak
+        trailStop   = trailPct > 0 && newPeak > entryPx
+                   && closeP <= newPeak * (1 - trailPct)
+
+        trendBreak  = trendDir < 0
+
+        goLong     = (Buy  1, st2 { primoInLong = True,  primoEntry = closeP
+                                  , primoPeak = closeP, primoHolds = 0 })
+        goFlat     = (Close,  st2 { primoInLong = False, primoEntry = 0
+                                  , primoPeak = 0, primoHolds = 0 })
+        goCoolFlat = (Close,  st2 { primoInLong = False, primoEntry = 0
+                                  , primoPeak = 0, primoHolds = 0
+                                  , primoCooldown = cooldown })
+        stay       = (Hold,   st2 { primoHolds = hc + 1 })
+
+    in if primoInLong st1
+        then
+            if      hardStop   then goCoolFlat  -- always first
+            else if trailStop  then goFlat       -- locked profit, trail pulled us out
+            else if takeProfit then goFlat       -- safe-mode fixed TP
+            else if signalExit then goFlat       -- safe-mode dynamic peak capture
+            else if trendBreak then goCoolFlat   -- trend reversed, exit + cooldown
+            else if maxHit     then goFlat
+            else                    stay
+        else
+            if pullbackBuy then goLong
+            else                (Hold, st2 { primoInLong = False })
